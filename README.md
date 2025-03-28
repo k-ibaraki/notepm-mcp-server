@@ -55,7 +55,7 @@ uv run notepm-mcp-server
       "--directory",
       "/<path to mcp-servers>/notepm-mcp-server",
       "run",
-      "notepm_mcp_server"
+      "notepm-mcp-server"
     ]
   }
 }
