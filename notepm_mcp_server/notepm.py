@@ -54,6 +54,15 @@ class SearchParams(BaseModel):
     per_page: int = 50
 
 
+class NotePMDetailParams(BaseModel):
+    """NotePM API詳細取得パラメータモデル
+
+    Attributes:
+        page_code (str): ページコード
+    """
+    page_code: str
+
+
 class NotePMAPIClient:
     """NotePM APIクライアント
 
@@ -106,6 +115,29 @@ class NotePMAPIClient:
 
         return response.text
 
+    async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
+        """NotePMの詳細取得APIを呼び出します
+
+        Args:
+            params (NotePMDetailParams): 詳細取得パラメータ
+
+        Returns:
+            str: 詳細取得結果のJSON文字列
+
+        Raises:
+            ValueError: APIリクエストが失敗した場合
+        """
+        headers = {"Authorization": f"Bearer {self.config.api_token}"}
+        url = f"{self.config.api_base}/{params.page_code}"
+        response = await self._client.get(url, headers=headers)
+
+        if response.status_code != 200:
+            raise ValueError(
+                f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
+            )
+
+        return response.text
+
 
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
@@ -123,8 +155,17 @@ async def serve() -> None:
         return [
             Tool(
                 name="search_notepm",
-                description="NotePMで指定されたクエリを検索します。",
+                description="""
+                    NotePMで指定されたクエリを検索します。
+                    記事の本文が長い場合は、本文の全文が返されないことがあります。
+                    全文を取得するには、get_notepm_page_detailを使用してください。
+                """,
                 inputSchema=SearchParams.schema(),
+            ),
+            Tool(
+                name="get_notepm_page_detail",
+                description="NotePMで指定されたページコードの詳細を取得します。",
+                inputSchema=NotePMDetailParams.schema(),
             )
         ]
 
@@ -143,9 +184,14 @@ async def serve() -> None:
             ValueError: 不明なツールが指定された場合
         """
         if name == "search_notepm":
-            params = SearchParams(**arguments)
+            search_params: SearchParams = SearchParams(**arguments)
             async with NotePMAPIClient(config) as client:
-                result = await client.search(params)
+                result = await client.search(search_params)
+                return [TextContent(type="text", text=result)]
+        elif name == "get_notepm_page_detail":
+            detail_params: NotePMDetailParams = NotePMDetailParams(**arguments)
+            async with NotePMAPIClient(config) as client:
+                result = await client.get_notepm_page_detail(detail_params)
                 return [TextContent(type="text", text=result)]
 
         raise ValueError(f"不明なツールです: {name}")
