@@ -115,7 +115,7 @@ class NotePMAPIClient:
 
         return response.text
 
-    async def get_page_detail(self, params: NotePMDetailParams) -> str:
+    async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
         """NotePMの詳細取得APIを呼び出します
 
         Args:
@@ -158,12 +158,12 @@ async def serve() -> None:
                 description="""
                     NotePMで指定されたクエリを検索します。
                     記事の本文が長い場合は、本文の全文が返されないことがあります。
-                    全文を取得するには、get_page_detailを使用してください。
+                    全文を取得するには、get_notepm_page_detailを使用してください。
                 """,
                 inputSchema=SearchParams.schema(),
             ),
             Tool(
-                name="get_page_detail",
+                name="get_notepm_page_detail",
                 description="NotePMで指定されたページコードの詳細を取得します。",
                 inputSchema=NotePMDetailParams.schema(),
             )
@@ -188,10 +188,10 @@ async def serve() -> None:
             async with NotePMAPIClient(config) as client:
                 result = await client.search(search_params)
                 return [TextContent(type="text", text=result)]
-        elif name == "get_page_detail":
+        elif name == "get_notepm_page_detail":
             detail_params: NotePMDetailParams = NotePMDetailParams(**arguments)
             async with NotePMAPIClient(config) as client:
-                result = await client.get_page_detail(detail_params)
+                result = await client.get_notepm_page_detail(detail_params)
                 return [TextContent(type="text", text=result)]
 
         raise ValueError(f"不明なツールです: {name}")
