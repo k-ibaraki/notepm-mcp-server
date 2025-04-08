@@ -140,8 +140,10 @@ class NotePMAPIClient:
                 f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
             )
 
-        return json.dumps(json.loads(response.text), ensure_ascii=False)
-
+        try:
+            return json.dumps(json.loads(response.text), ensure_ascii=False)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON response: {e}")
 
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
