@@ -113,7 +113,7 @@ class NotePMAPIClient:
                 f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
             )
 
-        return response.text
+        return json.dumps(json.loads(response.text), ensure_ascii=False)
 
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
         """NotePMの詳細取得APIを呼び出します
@@ -136,7 +136,7 @@ class NotePMAPIClient:
                 f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
             )
 
-        return response.text
+        return json.dumps(json.loads(response.text), ensure_ascii=False)
 
 
 async def serve() -> None:
