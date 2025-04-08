@@ -7,6 +7,7 @@ import httpx
 import os
 from typing import Optional
 from dotenv import load_dotenv
+import json
 
 # 環境変数の読み込み
 load_dotenv()
@@ -113,8 +114,11 @@ class NotePMAPIClient:
                 f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
             )
 
-        return response.text
-
+        try:
+            data = json.loads(response.text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON response: {e}")
+        return json.dumps(data, ensure_ascii=False)
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
         """NotePMの詳細取得APIを呼び出します
 
@@ -136,8 +140,10 @@ class NotePMAPIClient:
                 f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
             )
 
-        return response.text
-
+        try:
+            return json.dumps(json.loads(response.text), ensure_ascii=False)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON response: {e}")
 
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
@@ -156,7 +162,9 @@ async def serve() -> None:
             Tool(
                 name="search_notepm",
                 description="""
-                    NotePMで指定されたクエリを検索します。
+                    NotePM(ノートPM)で指定されたクエリを検索します。
+                    検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
+                    検索結果はJSON形式で返されます。
                     記事の本文が長い場合は、本文の全文が返されないことがあります。
                     全文を取得するには、get_notepm_page_detailを使用してください。
                 """,
@@ -164,7 +172,7 @@ async def serve() -> None:
             ),
             Tool(
                 name="get_notepm_page_detail",
-                description="NotePMで指定されたページコードの詳細を取得します。",
+                description="NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。",
                 inputSchema=NotePMDetailParams.schema(),
             )
         ]
