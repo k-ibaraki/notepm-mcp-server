@@ -57,7 +57,11 @@ uv run notepm-mcp-server
       "/<path to mcp-servers>/notepm-mcp-server",
       "run",
       "notepm-mcp-server"
-    ]
+    ],
+    "env": {
+      "NOTEPM_TEAM": "your-team-name",
+      "NOTEPM_API_TOKEN": "your-api-token"
+    }
   }
 }
 ```
