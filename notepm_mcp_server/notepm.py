@@ -166,12 +166,9 @@ class NotePMAPIClient:
         if isinstance(data, dict):
             # 検索結果の場合（pagesフィールドが存在する場合）
             if "pages" in data and isinstance(data["pages"], list):
-                for i, page in enumerate(data["pages"]):
+                for page in data["pages"]:
                     if isinstance(page, dict) and "body" in page:
                         original_body = page["body"]
-                        original_length = (
-                            len(original_body) if isinstance(original_body, str) else 0
-                        )
 
                         if (
                             isinstance(original_body, str)
@@ -184,9 +181,6 @@ class NotePMAPIClient:
                 page = data["page"]
                 if "body" in page:
                     original_body = page["body"]
-                    original_length = (
-                        len(original_body) if isinstance(original_body, str) else 0
-                    )
 
                     if (
                         isinstance(original_body, str)
@@ -194,6 +188,18 @@ class NotePMAPIClient:
                     ):
                         page["body"] = original_body[:max_length] + "..."
 
+
+def get_tool_description(env_var_name: str, default_description: str) -> str:
+    """環境変数からツールの説明を取得する
+
+    Args:
+        env_var_name (str): 環境変数の名前
+        default_description (str): デフォルトの説明文
+
+    Returns:
+        str: 環境変数から取得した説明文、または環境変数が設定されていない場合はデフォルトの説明文
+    """
+    return os.getenv(env_var_name, default_description)
 
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
@@ -204,27 +210,29 @@ async def serve() -> None:
     config = NotePMConfig()
     server: Server = Server("notepm-mcp")
 
+    # ツールの説明文のデフォルト値
+    default_search_description = """
+                    NotePM(ノートPM)で指定されたクエリを検索します。
+                    検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
+                    検索結果はJSON形式で返されます。
+                    記事の本文が長い場合は、本文の全文が返されないことがあります。
+                    全文を取得するには、notepm_page_detailを使用してください。
+                """
+    
+    default_detail_description = "NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。"
+
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         """利用可能なツールのリストを返します"""
         return [
             Tool(
-                name="search_notepm",
-                description="""
-                    NotePM(ノートPM)で指定されたクエリを検索します。
-                    検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
-                    検索結果はJSON形式で返されます。
-                    記事の本文が環境変数NOTEPM_MAX_BODY_LENGTHを超える場合は省略されます（...で表示）。
-                    全文を取得するには、get_notepm_page_detailを使用してください。
-                """,
+                name="notepm_search",
+                description=get_tool_description("NOTEPM_SEARCH_DESCRIPTION", default_search_description),
                 inputSchema=SearchParams.schema(),
             ),
             Tool(
-                name="get_notepm_page_detail",
-                description="""
-                    NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。
-                    記事の本文は省略されずに全文が表示されます。
-                """,
+                name="notepm_page_detail",
+                description=get_tool_description("NOTEPM_PAGE_DETAIL_DESCRIPTION", default_detail_description),
                 inputSchema=NotePMDetailParams.schema(),
             ),
         ]
@@ -243,12 +251,12 @@ async def serve() -> None:
         Raises:
             ValueError: 不明なツールが指定された場合
         """
-        if name == "search_notepm":
+        if name == "notepm_search":
             search_params: SearchParams = SearchParams(**arguments)
             async with NotePMAPIClient(config) as client:
                 result = await client.search(search_params)
                 return [TextContent(type="text", text=result)]
-        elif name == "get_notepm_page_detail":
+        elif name == "notepm_page_detail":
             detail_params: NotePMDetailParams = NotePMDetailParams(**arguments)
             async with NotePMAPIClient(config) as client:
                 result = await client.get_notepm_page_detail(detail_params)
