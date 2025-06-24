@@ -1,4 +1,3 @@
-import logging
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
@@ -22,6 +21,7 @@ class NotePMConfig:
         team (str): NotePMのチーム名
         api_token (str): NotePM APIのトークン
         api_base (str): APIのベースURL
+        max_body_length (int): 本文の最大文字数
     """
 
     def __init__(self):
@@ -30,6 +30,9 @@ class NotePMConfig:
         if not self.team or not self.api_token:
             raise ValueError("環境変数NOTEPM_TEAMとNOTEPM_API_TOKENが必要です")
         self.api_base = f"https://{self.team}.notepm.jp/api/v1/pages"
+
+        # 本文の最大文字数を環境変数から取得（デフォルト: 200）
+        self.max_body_length = int(os.getenv("NOTEPM_MAX_BODY_LENGTH", "200"))
 
 
 class SearchParams(BaseModel):
@@ -43,8 +46,9 @@ class SearchParams(BaseModel):
         tag_name (Optional[str]): タグ名によるフィルタリング
         created (Optional[str]): 作成日によるフィルタリング
         page (int): ページ番号 (デフォルト: 1)
-        per_page (int): 1ページあたりの結果数 (デフォルト: 50)
+        per_page (int): 1ページあたりの結果数 (デフォルト: 10)
     """
+
     q: str
     only_title: int = 0
     include_archived: int = 0
@@ -52,7 +56,7 @@ class SearchParams(BaseModel):
     tag_name: Optional[str] = None
     created: Optional[str] = None
     page: int = 1
-    per_page: int = 50
+    per_page: int = 10  # デフォルトを50から10に削減してレスポンスサイズを抑制
 
 
 class NotePMDetailParams(BaseModel):
@@ -61,6 +65,7 @@ class NotePMDetailParams(BaseModel):
     Attributes:
         page_code (str): ページコード
     """
+
     page_code: str
 
 
@@ -106,7 +111,7 @@ class NotePMAPIClient:
         response = await self._client.get(
             self.config.api_base,
             params=params.dict(exclude_none=True),  # Noneの値を除外してパラメータを構築
-            headers=headers
+            headers=headers,
         )
 
         if response.status_code != 200:
@@ -116,9 +121,12 @@ class NotePMAPIClient:
 
         try:
             data = json.loads(response.text)
+            # レスポンスの本文部分を設定された文字数で制限
+            self._truncate_body_content(data, self.config.max_body_length)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}")
         return json.dumps(data, ensure_ascii=False)
+
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
         """NotePMの詳細取得APIを呼び出します
 
@@ -141,9 +149,51 @@ class NotePMAPIClient:
             )
 
         try:
-            return json.dumps(json.loads(response.text), ensure_ascii=False)
+            data = json.loads(response.text)
+            # 詳細表示では本文を省略しない
+            return json.dumps(data, ensure_ascii=False)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}")
+
+    def _truncate_body_content(self, data: dict, max_length: int = 1000) -> None:
+        """レスポンスデータの本文部分を指定された文字数で省略します
+
+        Args:
+            data (dict): NotePM APIのレスポンスデータ
+            max_length (int): 本文の最大文字数 (デフォルト: 1000)
+        """
+
+        if isinstance(data, dict):
+            # 検索結果の場合（pagesフィールドが存在する場合）
+            if "pages" in data and isinstance(data["pages"], list):
+                for i, page in enumerate(data["pages"]):
+                    if isinstance(page, dict) and "body" in page:
+                        original_body = page["body"]
+                        original_length = (
+                            len(original_body) if isinstance(original_body, str) else 0
+                        )
+
+                        if (
+                            isinstance(original_body, str)
+                            and len(original_body) > max_length
+                        ):
+                            page["body"] = original_body[:max_length] + "..."
+
+            # 詳細取得結果の場合（pageフィールドが存在する場合）
+            elif "page" in data and isinstance(data["page"], dict):
+                page = data["page"]
+                if "body" in page:
+                    original_body = page["body"]
+                    original_length = (
+                        len(original_body) if isinstance(original_body, str) else 0
+                    )
+
+                    if (
+                        isinstance(original_body, str)
+                        and len(original_body) > max_length
+                    ):
+                        page["body"] = original_body[:max_length] + "..."
+
 
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
@@ -151,7 +201,6 @@ async def serve() -> None:
     NotePM検索機能を提供するMCPサーバーを起動し、標準入出力を使用して
     他のプロセスとコマンド通信を行います。
     """
-    logger = logging.getLogger(__name__)
     config = NotePMConfig()
     server: Server = Server("notepm-mcp")
 
@@ -165,16 +214,19 @@ async def serve() -> None:
                     NotePM(ノートPM)で指定されたクエリを検索します。
                     検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
                     検索結果はJSON形式で返されます。
-                    記事の本文が長い場合は、本文の全文が返されないことがあります。
+                    記事の本文が環境変数NOTEPM_MAX_BODY_LENGTHを超える場合は省略されます（...で表示）。
                     全文を取得するには、get_notepm_page_detailを使用してください。
                 """,
                 inputSchema=SearchParams.schema(),
             ),
             Tool(
                 name="get_notepm_page_detail",
-                description="NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。",
+                description="""
+                    NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。
+                    記事の本文は省略されずに全文が表示されます。
+                """,
                 inputSchema=NotePMDetailParams.schema(),
-            )
+            ),
         ]
 
     @server.call_tool()
