@@ -110,7 +110,7 @@ class NotePMAPIClient:
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
         response = await self._client.get(
             self.config.api_base,
-            params=params.dict(exclude_none=True),  # Noneの値を除外してパラメータを構築
+            params=params.model_dump(exclude_none=True),  # Noneの値を除外してパラメータを構築
             headers=headers,
         )
 
@@ -228,12 +228,12 @@ async def serve() -> None:
             Tool(
                 name="notepm_search",
                 description=get_tool_description("NOTEPM_SEARCH_DESCRIPTION", default_search_description),
-                inputSchema=SearchParams.schema(),
+                inputSchema=SearchParams.model_json_schema(),
             ),
             Tool(
                 name="notepm_page_detail",
                 description=get_tool_description("NOTEPM_PAGE_DETAIL_DESCRIPTION", default_detail_description),
-                inputSchema=NotePMDetailParams.schema(),
+                inputSchema=NotePMDetailParams.model_json_schema(),
             ),
         ]
 
