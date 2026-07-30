@@ -6,11 +6,20 @@ readme = "README.md"
 authors = [{ name = "Keita Ibaraki", email = "ibaraki@ncdc.co.jp" }]
 license = "MIT"
 requires-python = ">=3.10"
+# 上限を明示すること。上限が無いと、uv.lock を参照しないインストール経路
+# (uvx / pip install git+... など) で起動時に破壊的変更を含む最新版を取得してしまう。
+# 例: mcp 2.0.0 で mcp.server.lowlevel.server.request_ctx が削除された。
 dependencies = [
-    "httpx>=0.28.1",
-    "mcp[cli]>=1.6.0",
-    "mypy>=1.15.0",
-    "python-dotenv>=1.1.0",
+    "click>=8.1.0,<9",
+    "httpx>=0.28.1,<1",
+    "mcp[cli]>=1.6.0,<2",
+    "pydantic>=2.0.0,<3",
+    "python-dotenv>=1.1.0,<2",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0,<2",
 ]
 
 [project.scripts]
