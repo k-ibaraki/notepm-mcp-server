@@ -32,7 +32,7 @@ uv sync
 uv sync --frozen --no-dev   # uv.lock の固定バージョンのみを使う（開発用依存は除く）
 ```
 
-`--no-dev` を省くと `[dependency-groups] dev`（mypy など）まで実行環境に入り、
+`--no-dev` を省くと `[dependency-groups] dev`（型チェッカの ty）まで実行環境に入り、
 不要な依存をコンテナ起動ごとに取得することになります。
 
 uv を使わないイメージ（`pip install` 系）では、ロックから requirements を書き出してください：
@@ -73,6 +73,22 @@ pip install -r requirements.txt --no-deps
 そのため CA 証明書を持たない最小構成のイメージ（distroless、`ca-certificates` 未導入の Alpine など）では、
 NotePM への HTTPS 接続が証明書検証エラーになります。イメージに `ca-certificates` を導入するか、
 `SSL_CERT_FILE` もしくは `SSL_CERT_DIR` で証明書の場所を明示してください。
+
+## 開発
+
+### 型チェック
+
+型チェックには [ty](https://github.com/astral-sh/ty) を使用します。dev 依存に含まれているため、
+`uv sync` 済みであれば追加の準備は要りません。
+
+```sh
+uv run ty check
+```
+
+ty はまだ 0.0.x のプレビュー段階です。本リポジトリでは `pyproject.toml` の `[tool.ty.rules]` で
+`all = "error"` を指定し、既定では警告にとどまる規則も含めてすべてエラーとして扱っています。
+ty を更新すると新しい規則の追加によって指摘が増えることがあるため、バージョンの上限
+（`ty>=0.0.79,<0.1`）は外さず、レンジごと引き上げてください。
 
 ## 環境設定
 
