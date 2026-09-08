@@ -120,7 +120,7 @@ NOTEPM_API_TOKEN=your-api-token
 
 ### 任意の環境変数
 
-- `NOTEPM_MAX_BODY_LENGTH`: 検索結果の本文を切り詰める文字数（既定: 200）
+- `NOTEPM_MAX_BODY_LENGTH`: 検索結果の本文を切り詰める文字数（既定: 200）。超えた分は末尾を `...` に置き換えます。詳細取得（`notepm_page_detail`）は全文を返すため影響を受けません
 - `NOTEPM_SEARCH_DESCRIPTION` / `NOTEPM_PAGE_DETAIL_DESCRIPTION`: ツールの説明文の差し替え
 - `NOTEPM_RAISE_EXCEPTIONS`: デバッグ用。`1` / `true` / `yes` / `on` のいずれかで有効
 

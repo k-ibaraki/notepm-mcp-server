@@ -34,7 +34,7 @@ class NotePMConfig:
         team (str): NotePMのチーム名
         api_token (str): NotePM APIのトークン
         api_base (str): APIのベースURL
-        max_body_length (int): 本文の最大文字数
+        max_body_length (int): 検索結果の本文の最大文字数
         raise_exceptions (bool): ハンドラの例外を再送出するか（開発時のみ有効にする）
     """
 
@@ -45,7 +45,7 @@ class NotePMConfig:
             raise ValueError("環境変数NOTEPM_TEAMとNOTEPM_API_TOKENが必要です")
         self.api_base = f"https://{self.team}.notepm.jp/api/v1/pages"
 
-        # 本文の最大文字数を環境変数から取得（デフォルト: 200）
+        # 検索結果の本文の最大文字数を環境変数から取得（デフォルト: 200）
         self.max_body_length = int(os.getenv("NOTEPM_MAX_BODY_LENGTH", "200"))
 
         # 例外の再送出はデバッグ用。有効にすると想定外の例外でサーバーが停止するため、
@@ -402,7 +402,8 @@ class NotePMAPIClient:
             params (SearchParams): 検索パラメータ
 
         Returns:
-            str: 検索結果のJSON文字列
+            str: 検索結果のJSON文字列。各ページの本文は
+                NotePMConfig.max_body_length で切り詰める
 
         Raises:
             ValueError: APIリクエストが失敗した場合
@@ -419,8 +420,8 @@ class NotePMAPIClient:
 
         try:
             data = json.loads(response.text)
-            # レスポンスの本文部分を設定された文字数で制限
-            self._truncate_body_content(data, self.config.max_body_length)
+            # 検索結果の本文を設定された文字数で制限
+            self._truncate_search_bodies(data, self.config.max_body_length)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}")
         return json.dumps(data, ensure_ascii=False)
@@ -428,11 +429,17 @@ class NotePMAPIClient:
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
         """NotePMの詳細取得APIを呼び出します
 
+        応答サイズの方針: 本文には上限を設けない。notepm_search の説明が
+        「全文を取得するには notepm_page_detail を使う」と案内している以上、
+        ここで切り詰めると全文へ辿り着く経路が無くなるため。長いページで応答が
+        大きくなり得ることは、その代償として受け入れている。切り詰めるのは
+        検索結果だけ（_truncate_search_bodies を参照）。
+
         Args:
             params (NotePMDetailParams): 詳細取得パラメータ
 
         Returns:
-            str: 詳細取得結果のJSON文字列
+            str: 詳細取得結果のJSON文字列。本文は切り詰めない
 
         Raises:
             ValueError: APIリクエストが失敗した場合
@@ -449,43 +456,37 @@ class NotePMAPIClient:
 
         try:
             data = json.loads(response.text)
-            # 詳細表示では本文を省略しない
+            # 本文は切り詰めない（理由は docstring の「応答サイズの方針」を参照）
             return json.dumps(data, ensure_ascii=False)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}")
 
-    def _truncate_body_content(self, data: Any, max_length: int = 1000) -> None:
-        """レスポンスデータの本文部分を指定された文字数で省略します
+    def _truncate_search_bodies(self, data: Any, max_length: int) -> None:
+        """検索結果の各ページの本文を指定された文字数で省略します
+
+        対象は検索結果の pages 配列だけです。詳細取得は意図的に切り詰めないため
+        （get_notepm_page_detail を参照）、page キーは見ません。検索応答の page は
+        ページ番号を表す整数であって、本文の在り処ではありません。
 
         Args:
-            data (Any): NotePM APIのレスポンスデータ（JSONデコード結果）
-            max_length (int): 本文の最大文字数 (デフォルト: 1000)
+            data (Any): NotePMの検索APIのレスポンスデータ（JSONデコード結果）
+            max_length (int): 本文の最大文字数
         """
 
-        if isinstance(data, dict):
-            # 検索結果の場合（pagesフィールドが存在する場合）
-            if "pages" in data and isinstance(data["pages"], list):
-                for page in data["pages"]:
-                    if isinstance(page, dict) and "body" in page:
-                        original_body = page["body"]
+        if not isinstance(data, dict):
+            return
 
-                        if (
-                            isinstance(original_body, str)
-                            and len(original_body) > max_length
-                        ):
-                            page["body"] = original_body[:max_length] + "..."
+        pages = data.get("pages")
+        if not isinstance(pages, list):
+            return
 
-            # 詳細取得結果の場合（pageフィールドが存在する場合）
-            elif "page" in data and isinstance(data["page"], dict):
-                page = data["page"]
-                if "body" in page:
-                    original_body = page["body"]
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
 
-                    if (
-                        isinstance(original_body, str)
-                        and len(original_body) > max_length
-                    ):
-                        page["body"] = original_body[:max_length] + "..."
+            original_body = page.get("body")
+            if isinstance(original_body, str) and len(original_body) > max_length:
+                page["body"] = original_body[:max_length] + "..."
 
 
 def get_tool_description(env_var_name: str, default_description: str) -> str:

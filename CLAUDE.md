@@ -27,6 +27,7 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 ## 構成
 
 - `notepm_mcp_server/__init__.py` — click の CLI エントリポイント。`-v` の数からログ水準を決めて `asyncio.run(serve())` を呼ぶ
+- `notepm_mcp_server/__main__.py` — `python -m notepm_mcp_server` から `main()` を呼ぶだけの薄い入口
 - `notepm_mcp_server/notepm.py` — 設定・パラメータモデル・API クライアント・MCP サーバーのすべて
 - `tests/` — pytest。実 API には接続しない
 
@@ -35,15 +36,17 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - MCP の低レベルサーバは `mcp` 2.x の注入方式（`Server(on_list_tools=..., on_call_tool=...)`）で使います。1.x のデコレータ方式（`@server.list_tools`）は廃止済みで、移行時に書き換えた経緯があります
 - `server.run()` の `raise_exceptions` は既定で無効です。ハンドラを抜けた例外は SDK 側でエラー応答に変換され、トレースバックが stderr のログに残ります。`NOTEPM_RAISE_EXCEPTIONS=1` を渡したときだけ再送出され、その場合は **例外がプロセスごとサーバーを停止させます**。デバッグ専用の切り替えで、常駐運用では有効にしません
 - ツールの異常は `CallToolResult(is_error=True)` で返します。ツール実行の本体は `call_notepm_tool()` にあり、そこで例外を捕捉してこの形に変換します。`on_call_tool` は委譲するだけです。この捕捉があるため、ツール実行中の例外は `NOTEPM_RAISE_EXCEPTIONS` の設定に関わらず再送出されません
-- 捕捉した例外のログは原因で水準を分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。拒否は防御が働いた結果なので、本当の異常と同じ水準にはしません
+- 捕捉した例外のログは原因で水準を分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。拒否は防御が働いた結果なので、本当の異常と同じ水準にはしません。なお、ツール名は外部から届く未検証の値なので、ログには必ず `%r` で出します。生のまま流すと、改行を含む名前で偽のログ行を作られます
 - サーバーの組み立ては `create_server(config)` にあり、stdio への接続を含みません。テストは `mcp.client.Client` に渡して in-process で叩いています（`tests/test_server.py`）
 - HTTP クライアントは `create_server()` の lifespan がサーバーの生存期間にひとつだけ持ちます。`server.run()` の内側で開き、抜けるときに閉じます。ツール呼び出しは `ctx.lifespan_context` から受け取ります。呼び出しごとに作り直すと、TLS ハンドシェイクとコネクションプールが毎回捨てられます（Issue #10）
 - タイムアウトと接続数は `HTTP_TIMEOUT` / `HTTP_LIMITS` にコード定数として明示しています。環境変数では変えません。`keepalive_expiry` を既定の 5 秒から伸ばしているのは、検索から詳細取得までの間に呼び出し側の思考時間が挟まるためです
 - 再試行は `NotePMAPIClient._get_with_retry()` にあり、待てば結果が変わり得る失敗だけを対象にします（`RETRYABLE_STATUS_CODES` と `RETRYABLE_TRANSPORT_ERRORS`、最大 `MAX_ATTEMPTS` 回）。`ReadTimeout` は待ち時間が試行回数の分だけ積み上がるため含めません。`Retry-After` は秒数として読めるときだけ従い、`MAX_RETRY_WAIT_SECONDS` で丸めます。再試行のログには状態コードと試行回数だけを残し、応答本文は出しません
 - 1 回の呼び出しは、再試行と待ち時間まで含めて `TOTAL_TIMEOUT_SECONDS`（60 秒）で打ち切ります。`_get()` が `asyncio.wait_for()` で `_get_with_retry()` を囲み、超えたら他の API 失敗と同じ `ValueError` にします。試行ごとの上限しか持たないと読み取り 30 秒 × 3 試行で 90 秒を超え得るうえ、MCP のホスト側の制限に先に打ち切られると理由が呼び出し側に伝わりません
-- ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
+- ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します。モデルの docstring と各フィールドの `description` は呼び出し側へそのまま配信されるため、保守者向けのメモはクラスの外のコメントに書きます
+- 日付での絞り込みは `DATE_PATTERN` で書式を検査します。`\d` ではなく `[0-9]` と書くのは、pydantic の正規表現では `\d` が全角数字にも一致してしまい、公開するスキーマ（ECMA-262 準拠で `\d` は ASCII のみ）と判定がずれるためです
+- 検索の `per_page` は既定 10 です。NotePM API の既定（20）ではなく、応答が大きくなりすぎないようこのサーバーの判断で小さく取っています。上限の 100 だけが API 仕様に由来します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
-- 検索応答は `_truncate_body_content()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は切り詰めません
+- 検索応答は `_truncate_search_bodies()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は意図的に切り詰めません（全文への経路を残すため。理由は `get_notepm_page_detail` の docstring に書いてあります）
 - `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します。設定ミスは起動時に気付けるべきなので、この失敗はそのまま落とします
 - `notepm` モジュールは import 時に `load_dotenv()` を呼びます
 
@@ -62,3 +65,5 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - HTTP は `httpx2` の `MockTransport` に差し替えます。新しいテストは `tests/conftest.py` の `mock_api` フィクスチャを使ってください。応答を遅らせたいときはハンドラを `async def` で書けます
 - autouse のフィクスチャが、モックを介さない HTTP リクエストの送信を失敗させ、`NOTEPM_` 系の環境変数も毎回削除します。手元の `.env` に結果が左右されない前提を壊さないでください。クライアントの生成自体は lifespan が毎回行うため、禁じているのは送信のほうです
 - 同じく autouse の `no_retry_waits` が再試行の待ち時間を 0 にします。待ち時間の決め方そのものは `tests/test_retry_policy.py` で固定しています
+- `asyncio_mode = "auto"` を指定しているため、非同期テストに `@pytest.mark.asyncio` は付けません
+- 環境変数の揃った設定は `config` フィクスチャを、`CallToolResult` からの本文の取り出しは `tests/conftest.py` の `content_text()` を使います。ログの水準そのものを確かめるテストは `caplog` で見ています
