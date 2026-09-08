@@ -20,6 +20,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1,<10",
+    "pytest-asyncio>=1.4.0,<2",
     "ty>=0.0.79,<0.1",
 ]
 
@@ -34,3 +36,8 @@ build-backend = "hatchling.build"
 # 新しい版で規則が追加されると指摘が増え得るので、上限を固定したうえで更新時に確認すること。
 [tool.ty.rules]
 all = "error"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 非同期テストに async マーカーを都度付けずに済ませる。
+asyncio_mode = "auto"
