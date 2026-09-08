@@ -41,18 +41,22 @@ class NotePMConfig:
 # NotePM API が日付の絞り込みで受け付ける書式（YYYY-MM-DD）。
 # 実在する日付かまでは検査しない。ここでの目的は "2020/08/01" や
 # ISO 8601 の日時のような別書式を、リクエストを送る前に弾くことにある。
-DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+# \d ではなく [0-9] と書くのは、pydantic の pattern が使う正規表現では \d が
+# Unicode の数字全体に一致し、全角の "２０２０-０８-０１" まで通してしまうため。
+# JSON Schema の pattern は ECMA-262 準拠（\d は ASCII のみ）とされているので、
+# \d のままだと公開したスキーマの意味とサーバー側の判定もずれる。
+DATE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 
 DateFilter = Optional[Annotated[str, Field(pattern=DATE_PATTERN)]]
 
 
+# このモデルの JSON スキーマは notepm_search の入力スキーマとしてそのまま公開される。
+# クラスの docstring も schema の description として配信されるため、保守者向けのメモは
+# ここに書き、docstring には呼び出し側にとって意味のある説明だけを残すこと。
+# ツールを呼ぶ側が値の意味と範囲を読み取れるよう、フィールドごとに説明と制約を持たせて
+# いる。制約は NotePM API の仕様に合わせること。
 class SearchParams(BaseModel):
-    """NotePM のページ検索 API (GET /api/v1/pages) に渡すパラメータ。
-
-    このモデルの JSON スキーマがそのまま notepm_search ツールの入力スキーマとして
-    公開される。ツールを呼ぶ側が値の意味と範囲を読み取れるよう、フィールドごとに
-    説明と制約を持たせている。制約は NotePM API の仕様に合わせること。
-    """
+    """NotePM のページ検索 API (GET /api/v1/pages) に渡すパラメータ。"""
 
     q: Annotated[
         str,
@@ -137,12 +141,10 @@ class SearchParams(BaseModel):
     ] = 10
 
 
+# SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
+# description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
 class NotePMDetailParams(BaseModel):
-    """NotePM のページ詳細取得 API (GET /api/v1/pages/{page_code}) に渡すパラメータ。
-
-    SearchParams と同じく、このモデルの JSON スキーマがそのまま
-    notepm_page_detail ツールの入力スキーマとして公開される。
-    """
+    """NotePM のページ詳細取得 API (GET /api/v1/pages/{page_code}) に渡すパラメータ。"""
 
     page_code: Annotated[
         str,
