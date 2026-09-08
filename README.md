@@ -58,7 +58,7 @@ pip install -r requirements.txt --no-deps
 | --- | --- | --- |
 | `mcp` | `>=2.2.0,<3` | 低レベルサーバは 2.x のハンドラ注入方式（`on_list_tools` / `on_call_tool`）を使用 |
 | `httpx2` | `>=2.12.0,<3` | `httpx` の後継。`httpx` 0.28.1 は実質保守停止のため移行済み |
-| `pydantic` | `>=2.0.0,<3` | ツールの入力スキーマ生成に使用 |
+| `pydantic` | `>=2.12.0,<3` | ツールの入力スキーマ生成に使用 |
 | `click` | `>=8.1.0,<9` | CLI エントリポイント |
 | `python-dotenv` | `>=1.1.0,<2` | `.env` の読み込み |
 
@@ -101,11 +101,13 @@ uv run notepm-mcp-server
 ```json
 "servers": {
   "notepm-mcp-server": {
-  "command": "uv",
+    "command": "uv",
     "args": [
       "--directory",
       "/<path to mcp-servers>/notepm-mcp-server",
       "run",
+      "--frozen",
+      "--no-dev",
       "notepm-mcp-server"
     ],
     "env": {
