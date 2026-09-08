@@ -2,11 +2,11 @@ from mcp import types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx2
 import os
 from types import TracebackType
-from typing import Any, Optional
+from typing import Annotated, Any, Literal, Optional
 from dotenv import load_dotenv
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
@@ -38,38 +38,123 @@ class NotePMConfig:
         self.max_body_length = int(os.getenv("NOTEPM_MAX_BODY_LENGTH", "200"))
 
 
+# NotePM API が日付の絞り込みで受け付ける書式（YYYY-MM-DD）。
+# 実在する日付かまでは検査しない。ここでの目的は "2020/08/01" や
+# ISO 8601 の日時のような別書式を、リクエストを送る前に弾くことにある。
+# \d ではなく [0-9] と書くのは、pydantic の pattern が使う正規表現では \d が
+# Unicode の数字全体に一致し、全角の "２０２０-０８-０１" まで通してしまうため。
+# JSON Schema の pattern は ECMA-262 準拠（\d は ASCII のみ）とされているので、
+# \d のままだと公開したスキーマの意味とサーバー側の判定もずれる。
+DATE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+DateFilter = Optional[Annotated[str, Field(pattern=DATE_PATTERN)]]
+
+
+# このモデルの JSON スキーマは notepm_search の入力スキーマとしてそのまま公開される。
+# クラスの docstring も schema の description として配信されるため、保守者向けのメモは
+# ここに書き、docstring には呼び出し側にとって意味のある説明だけを残すこと。
+# ツールを呼ぶ側が値の意味と範囲を読み取れるよう、フィールドごとに説明と制約を持たせて
+# いる。制約は NotePM API の仕様に合わせること。
 class SearchParams(BaseModel):
-    """NotePM API検索パラメータモデル
+    """NotePM のページ検索 API (GET /api/v1/pages) に渡すパラメータ。"""
 
-    Attributes:
-        q (str): 検索クエリ
-        only_title (int): タイトルのみを検索するかどうか (0: 全文検索, 1: タイトルのみ)
-        include_archived (int): アーカイブされたページを含めるかどうか (0: 含めない, 1: 含める)
-        note_code (Optional[str]): ノートコードによるフィルタリング
-        tag_name (Optional[str]): タグ名によるフィルタリング
-        created (Optional[str]): 作成日によるフィルタリング
-        page (int): ページ番号 (デフォルト: 1)
-        per_page (int): 1ページあたりの結果数 (デフォルト: 10)
-    """
+    q: Annotated[
+        str,
+        Field(
+            description=(
+                "検索する文字列。空白区切りの単語による AND 検索で、"
+                "自然言語の文章は解釈されない。"
+            )
+        ),
+    ]
+    only_title: Annotated[
+        Literal[0, 1],
+        Field(description="検索する範囲。0 は本文を含む全文検索、1 はタイトルのみの検索。"),
+    ] = 0
+    include_archived: Annotated[
+        Literal[0, 1],
+        Field(description="アーカイブ済みページの扱い。0 は検索対象から除き、1 は含める。"),
+    ] = 0
+    note_code: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "特定のノートに絞り込む場合のノートコード（例: abcdef）。"
+                "検索結果の note_code をそのまま渡せる。未指定なら全ノートが対象。"
+            )
+        ),
+    ] = None
+    tag_name: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "特定のタグに絞り込む場合のタグ名（例: 議事録）。"
+                "タグ名そのものを渡す。未指定ならタグでは絞り込まない。"
+            )
+        ),
+    ] = None
+    created: Annotated[
+        Optional[str],
+        Field(
+            description=(
+                "作成者で絞り込む場合のユーザーコード（例: 0000000001）。"
+                "検索結果の created_by.user_code に対応する。"
+                "作成日での絞り込みではないので、日付は created_at_from / created_at_to を使う。"
+            )
+        ),
+    ] = None
+    created_at_from: Annotated[
+        DateFilter,
+        Field(description="作成日時の範囲の開始。YYYY-MM-DD 形式で指定する（例: 2020-08-01）。"),
+    ] = None
+    created_at_to: Annotated[
+        DateFilter,
+        Field(description="作成日時の範囲の終了。YYYY-MM-DD 形式で指定する（例: 2020-08-31）。"),
+    ] = None
+    updated_at_from: Annotated[
+        DateFilter,
+        Field(description="更新日時の範囲の開始。YYYY-MM-DD 形式で指定する（例: 2020-08-01）。"),
+    ] = None
+    updated_at_to: Annotated[
+        DateFilter,
+        Field(description="更新日時の範囲の終了。YYYY-MM-DD 形式で指定する（例: 2020-08-31）。"),
+    ] = None
+    page: Annotated[
+        int,
+        Field(
+            ge=1,
+            description="取得するページ番号。1 から始まる。件数の続きは page を増やして取得する。",
+        ),
+    ] = 1
+    # 既定値は NotePM API の 20 ではなく 10。上限の 100 は API 仕様に合わせたもので、
+    # 既定を小さく取っているのは応答が大きくなりすぎないようにするため（意図的）。
+    per_page: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=100,
+            description=(
+                "1 ページあたりの取得件数。NotePM API の上限は 100。"
+                "応答が大きくなりすぎないよう、このサーバーの既定値は 10 にしている。"
+            ),
+        ),
+    ] = 10
 
-    q: str
-    only_title: int = 0
-    include_archived: int = 0
-    note_code: Optional[str] = None
-    tag_name: Optional[str] = None
-    created: Optional[str] = None
-    page: int = 1
-    per_page: int = 10  # デフォルトを50から10に削減してレスポンスサイズを抑制
 
-
+# SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
+# description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
 class NotePMDetailParams(BaseModel):
-    """NotePM API詳細取得パラメータモデル
+    """NotePM のページ詳細取得 API (GET /api/v1/pages/{page_code}) に渡すパラメータ。"""
 
-    Attributes:
-        page_code (str): ページコード
-    """
-
-    page_code: str
+    page_code: Annotated[
+        str,
+        Field(
+            description=(
+                "取得するページのページコード（例: aaaaad0001）。"
+                "notepm_search の検索結果に含まれる page_code をそのまま渡す。"
+            )
+        ),
+    ]
 
 
 class NotePMAPIClient:
