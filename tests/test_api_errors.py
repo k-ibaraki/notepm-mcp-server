@@ -116,6 +116,27 @@ async def test_search_bad_request_stays_generic(
     assert "指定したパラメータの値を見直してください" in str(error.value)
 
 
+async def test_rate_limit_message_claims_no_specific_limit(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """429 の文言に具体的な上限値は載せない。
+
+    NotePM の API ドキュメントは 1 分あたり 60 リクエストとするが、実応答の
+    X-RateLimit-Limit ヘッダは 120 を返す。どちらが実際の上限かこちらでは確かめ
+    られないため、確かめられない数字を呼び出し側へ渡さない（Issue #32）。
+    """
+    mock_api(lambda request: httpx2.Response(429, text="Too Many Requests"))
+
+    with pytest.raises(notepm.NotePMRateLimitError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    message = str(error.value)
+    assert "60" not in message
+    assert "120" not in message
+    assert "再試行" in message
+
+
 async def test_unclassified_status_stays_generic(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:

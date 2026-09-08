@@ -439,9 +439,12 @@ def _raise_for_status(
     if status == 404:
         raise NotePMNotFoundError(not_found_message, status)
     if status == 429:
+        # 具体的な上限値は載せない。NotePM の API ドキュメントは「ユーザ毎に1分間に60
+        # リクエスト」とするが、実応答の X-RateLimit-Limit ヘッダは 120 を返す。どちらが
+        # 実際の上限かこちらでは確かめられないので、確かめられない数字を呼び出し側へ
+        # 渡さない（Issue #32）。待てば直る失敗であることだけを伝えれば足りる。
         raise NotePMRateLimitError(
             f"NotePM API のリクエスト制限に達しました (HTTP {status})。"
-            "制限はユーザーごとに 1 分あたり 60 リクエストです。"
             "少し時間をおいてから再試行してください。",
             status,
         )
