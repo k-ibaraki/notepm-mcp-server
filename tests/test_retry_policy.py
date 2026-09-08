@@ -50,6 +50,14 @@ def test_unparsable_retry_after_falls_back_to_backoff() -> None:
     assert notepm._retry_delay(1, response) == 0.5
 
 
+@pytest.mark.parametrize("raw", ["nan", "inf"])
+def test_non_finite_retry_after_falls_back_to_backoff(raw: str) -> None:
+    """float() は nan や inf も受け付けるが、待ち時間としては使えない。"""
+    response = httpx2.Response(429, headers={"Retry-After": raw})
+
+    assert notepm._retry_delay(1, response) == 0.5
+
+
 def test_negative_retry_after_does_not_go_below_zero() -> None:
     response = httpx2.Response(429, headers={"Retry-After": "-5"})
 

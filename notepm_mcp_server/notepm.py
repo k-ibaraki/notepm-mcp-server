@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import logging
+import math
 
 # 環境変数の読み込み
 load_dotenv()
@@ -243,10 +244,15 @@ def _retry_after_seconds(response: httpx2.Response) -> float | None:
     if raw is None:
         return None
     try:
-        return max(float(raw), 0.0)
+        seconds = float(raw)
     except ValueError:
         # HTTP-date 形式は解釈しない。読めない値はバックオフに任せる。
         return None
+    if not math.isfinite(seconds):
+        # float() は "nan" や "inf" も受け付ける。nan は上限で丸めても nan のまま
+        # sleep へ渡ってしまうため、ヘッダが無かったものとして扱う。
+        return None
+    return max(seconds, 0.0)
 
 
 def _retry_delay(attempt: int, response: httpx2.Response | None) -> float:
