@@ -50,7 +50,7 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - 検索の `per_page` は既定 10 です。NotePM API の既定（20）ではなく、応答が大きくなりすぎないようこのサーバーの判断で小さく取っています。上限の 100 だけが API 仕様に由来します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
 - 検索応答は `_truncate_search_bodies()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は意図的に切り詰めません（全文への経路を残すため。理由は `get_notepm_page_detail` の docstring に書いてあります）
-- `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します。設定ミスは起動時に気付けるべきなので、この失敗はそのまま落とします
+- `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します。設定ミスは起動時に気付けるべきなので、この失敗はそのまま落とします。`NOTEPM_MAX_BODY_LENGTH` も同じ扱いで、`_read_max_body_length()` が整数として読めない値と負の値を `ValueError` で弾きます。`int()` の素の例外はどの環境変数の話か読み取れないため、変数名と受け取った値を添え直しています（値はトークンと違って秘密ではないので載せて構いません）。空文字は `NOTEPM_RAISE_EXCEPTIONS` と揃えて未設定と同じに扱います
 - `notepm` モジュールは import 時に `load_dotenv()` を呼びます
 
 ## 依存関係の方針

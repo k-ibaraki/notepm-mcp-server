@@ -106,28 +106,45 @@ uv run pytest
 
 ## 環境設定
 
-以下の環境変数を設定する必要があります：
+サーバーが読む環境変数は次のとおりです。`NOTEPM_TEAM` と `NOTEPM_API_TOKEN` は必須で、
+どちらかが欠けていると起動時に `ValueError` を送出して停止します。設定の誤りは
+動き出す前に気付けるほうがよいためです。
 
-- `NOTEPM_TEAM`: NotePMのチーム名
-- `NOTEPM_API_TOKEN`: NotePM APIトークン
+| 環境変数 | 必須 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| `NOTEPM_TEAM` | ○ | なし | NotePM のチーム名。API のホスト名（`https://<team>.notepm.jp`）に使います |
+| `NOTEPM_API_TOKEN` | ○ | なし | NotePM の API トークン |
+| `NOTEPM_MAX_BODY_LENGTH` | | `200` | 検索結果の本文を切り詰める文字数 |
+| `NOTEPM_SEARCH_DESCRIPTION` | | 実装の既定文 | `notepm_search` の説明文の差し替え |
+| `NOTEPM_PAGE_DETAIL_DESCRIPTION` | | 実装の既定文 | `notepm_page_detail` の説明文の差し替え |
+| `NOTEPM_RAISE_EXCEPTIONS` | | 無効 | デバッグ用。ハンドラを抜けた例外を再送出します |
 
-`.env`ファイルを作成して設定することもできます：
+`.env` ファイルに書いても読み込まれます。`.env.sample` が同じ一覧を持っているので、
+複製して値を埋めるのが手早いはずです。
 
-```.env
-NOTEPM_TEAM=your-team-name
-NOTEPM_API_TOKEN=your-api-token
+```sh
+cp .env.sample .env
 ```
 
-### 任意の環境変数
+MCP クライアントから起動する場合は、`.env` の代わりにクライアント側の設定へ書けます
+（「MCP クライアントの設定」を参照）。
 
-- `NOTEPM_MAX_BODY_LENGTH`: 検索結果の本文を切り詰める文字数（既定: 200）。超えた分は末尾を `...` に置き換えます。詳細取得（`notepm_page_detail`）は全文を返すため影響を受けません
-- `NOTEPM_SEARCH_DESCRIPTION` / `NOTEPM_PAGE_DETAIL_DESCRIPTION`: ツールの説明文の差し替え
-- `NOTEPM_RAISE_EXCEPTIONS`: デバッグ用。`1` / `true` / `yes` / `on` のいずれかで有効
+### NOTEPM_MAX_BODY_LENGTH
 
-`NOTEPM_RAISE_EXCEPTIONS` を有効にすると、ハンドラを抜けた例外がそのまま送出され、
-サーバープロセスが停止します。原因の切り分けには便利ですが、常駐させる通常の運用では
-設定しないでください。既定の無効のままなら、想定外の例外はクライアントへのエラー応答に
-変換され、サーバーは動き続けます。
+検索（`notepm_search`）の結果に含まれる本文を、この文字数で切り詰めます。超えた分は
+末尾を `...` に置き換えます。詳細取得（`notepm_page_detail`）は全文を返すため、この設定の
+影響を受けません。全文が要るときは、検索結果の `page_code` を詳細取得へ渡してください。
+
+指定できるのは 0 以上の整数です。`0` は本文を丸ごと省略する指定として扱います。整数として
+読めない値や負の値を渡した場合は、変数名と受け取った値を添えた `ValueError` で起動に
+失敗します。値を空にしたときは、未設定と同じく既定値になります。
+
+### NOTEPM_RAISE_EXCEPTIONS
+
+`1` / `true` / `yes` / `on` のいずれかで有効になります（大文字小文字は問いません）。
+有効にすると、ハンドラを抜けた例外がそのまま送出され、サーバープロセスが停止します。
+原因の切り分けには便利ですが、常駐させる通常の運用では設定しないでください。既定の
+無効のままなら、想定外の例外はクライアントへのエラー応答に変換され、サーバーは動き続けます。
 
 なお、ツール実行中の例外は `call_notepm_tool()` が捕捉して `isError` の結果に変換するため、
 このフラグの影響を受けません。フラグが効くのは、ツール一覧の取得など、ハンドラの外へ
@@ -218,23 +235,58 @@ MCP クライアント経由で起動している場合、この出力はクラ�
 uv run notepm-mcp-server
 ```
 
-### MCPクライアントの設定
+### MCP クライアントの設定
+
+サーバーを登録するキーの名前はクライアントによって異なります。以下はどちらも設定ファイル
+全体なので、そのまま貼り付けたうえで `--directory` のパスと `env` の値を書き換えてください。
+`--directory` には、このリポジトリを clone した先の絶対パスを指定します。
+
+`--frozen --no-dev` を付けているのは、`uv.lock` を尊重して起動するためです
+（「依存関係の方針」を参照）。
+
+VS Code（ワークスペースの `.vscode/mcp.json`、またはユーザーの `mcp.json`）:
 
 ```json
-"servers": {
-  "notepm-mcp-server": {
-    "command": "uv",
-    "args": [
-      "--directory",
-      "/<path to mcp-servers>/notepm-mcp-server",
-      "run",
-      "--frozen",
-      "--no-dev",
-      "notepm-mcp-server"
-    ],
-    "env": {
-      "NOTEPM_TEAM": "your-team-name",
-      "NOTEPM_API_TOKEN": "your-api-token"
+{
+  "servers": {
+    "notepm-mcp-server": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/notepm-mcp-server",
+        "run",
+        "--frozen",
+        "--no-dev",
+        "notepm-mcp-server"
+      ],
+      "env": {
+        "NOTEPM_TEAM": "your-team-name",
+        "NOTEPM_API_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
+```
+
+Claude Desktop（`claude_desktop_config.json`）や Claude Code（`.mcp.json`）:
+
+```json
+{
+  "mcpServers": {
+    "notepm-mcp-server": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/notepm-mcp-server",
+        "run",
+        "--frozen",
+        "--no-dev",
+        "notepm-mcp-server"
+      ],
+      "env": {
+        "NOTEPM_TEAM": "your-team-name",
+        "NOTEPM_API_TOKEN": "your-api-token"
+      }
     }
   }
 }

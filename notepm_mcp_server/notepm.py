@@ -24,6 +24,45 @@ logger = logging.getLogger(__name__)
 # 真として扱う環境変数の値。大文字小文字は区別しない。
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
+# 検索結果の本文を切り詰める既定の文字数。
+DEFAULT_MAX_BODY_LENGTH = 200
+
+
+def _read_max_body_length() -> int:
+    """NOTEPM_MAX_BODY_LENGTH を読み、本文を切り詰める文字数として解釈する
+
+    設定ミスは起動時に気付けるべきなので、解釈できない値はここで送出して落とす。
+    int() の ValueError をそのまま通すと "invalid literal for int()" としか出ず、
+    どの環境変数の話なのかが読み取れないため、変数名と受け取った値を添え直す。
+    値は API トークンと違って秘密ではないので、メッセージに載せてよい。
+
+    Returns:
+        int: 本文を切り詰める文字数。未設定または空文字なら DEFAULT_MAX_BODY_LENGTH
+
+    Raises:
+        ValueError: 整数として読めない値、または負の値が指定された場合
+    """
+    # 空文字は未設定と同じに扱う。NOTEPM_RAISE_EXCEPTIONS と揃えた振る舞いで、
+    # .env に値の無い行が残っていても既定値で起動できるようにするため。
+    raw = os.getenv("NOTEPM_MAX_BODY_LENGTH", "").strip()
+    if not raw:
+        return DEFAULT_MAX_BODY_LENGTH
+
+    # 読めない値と負の値は、利用者から見れば同じ「指定できない値」なので同じ文言で返す。
+    message = f"環境変数NOTEPM_MAX_BODY_LENGTHには0以上の整数を指定してください: {raw!r}"
+
+    try:
+        max_body_length = int(raw)
+    except ValueError:
+        raise ValueError(message) from None
+
+    # 負の値を許すと body[:-3] のように末尾から削る切り詰めになり、「最大文字数」
+    # としての意味を成さない。0 は本文を丸ごと省略する指定として通す。
+    if max_body_length < 0:
+        raise ValueError(message)
+
+    return max_body_length
+
 
 class NotePMConfig:
     """NotePM APIの設定を管理するクラス
@@ -45,8 +84,8 @@ class NotePMConfig:
             raise ValueError("環境変数NOTEPM_TEAMとNOTEPM_API_TOKENが必要です")
         self.api_base = f"https://{self.team}.notepm.jp/api/v1/pages"
 
-        # 検索結果の本文の最大文字数を環境変数から取得（デフォルト: 200）
-        self.max_body_length = int(os.getenv("NOTEPM_MAX_BODY_LENGTH", "200"))
+        # 検索結果の本文の最大文字数。既定値と不正値の扱いは _read_max_body_length にある。
+        self.max_body_length = _read_max_body_length()
 
         # 例外の再送出はデバッグ用。有効にすると想定外の例外でサーバーが停止するため、
         # 常駐する通常起動では無効のままにする（デフォルト: 無効）。
