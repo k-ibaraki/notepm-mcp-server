@@ -40,6 +40,7 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - HTTP クライアントは `create_server()` の lifespan がサーバーの生存期間にひとつだけ持ちます。`server.run()` の内側で開き、抜けるときに閉じます。ツール呼び出しは `ctx.lifespan_context` から受け取ります。呼び出しごとに作り直すと、TLS ハンドシェイクとコネクションプールが毎回捨てられます（Issue #10）
 - タイムアウトと接続数は `HTTP_TIMEOUT` / `HTTP_LIMITS` にコード定数として明示しています。環境変数では変えません。`keepalive_expiry` を既定の 5 秒から伸ばしているのは、検索から詳細取得までの間に呼び出し側の思考時間が挟まるためです
 - 再試行は `NotePMAPIClient._get()` にあり、待てば結果が変わり得る失敗だけを対象にします（`RETRYABLE_STATUS_CODES` と `RETRYABLE_TRANSPORT_ERRORS`、最大 `MAX_ATTEMPTS` 回）。`ReadTimeout` は待ち時間が試行回数の分だけ積み上がるため含めません。`Retry-After` は秒数として読めるときだけ従い、`MAX_RETRY_WAIT_SECONDS` で丸めます。再試行のログには状態コードと試行回数だけを残し、応答本文は出しません
+- 1 回の呼び出しは、再試行と待ち時間まで含めて `TOTAL_TIMEOUT_SECONDS`（60 秒）で打ち切ります。`_get()` が `asyncio.wait_for()` で `_get_with_retry()` を囲み、超えたら他の API 失敗と同じ `ValueError` にします。試行ごとの上限しか持たないと読み取り 30 秒 × 3 試行で 90 秒を超え得るうえ、MCP のホスト側の制限に先に打ち切られると理由が呼び出し側に伝わりません
 - ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
 - 検索応答は `_truncate_body_content()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は切り詰めません
@@ -58,6 +59,6 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 
 ## テスト
 
-- HTTP は `httpx2` の `MockTransport` に差し替えます。新しいテストは `tests/conftest.py` の `mock_api` フィクスチャを使ってください
+- HTTP は `httpx2` の `MockTransport` に差し替えます。新しいテストは `tests/conftest.py` の `mock_api` フィクスチャを使ってください。応答を遅らせたいときはハンドラを `async def` で書けます
 - autouse のフィクスチャが、モックを介さない HTTP リクエストの送信を失敗させ、`NOTEPM_` 系の環境変数も毎回削除します。手元の `.env` に結果が左右されない前提を壊さないでください。クライアントの生成自体は lifespan が毎回行うため、禁じているのは送信のほうです
 - 同じく autouse の `no_retry_waits` が再試行の待ち時間を 0 にします。待ち時間の決め方そのものは `tests/test_retry_policy.py` で固定しています
