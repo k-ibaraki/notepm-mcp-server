@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx2
 import pytest
+from mcp import types
+from mcp.types import TextContent
 
 from notepm_mcp_server import notepm
 
@@ -21,6 +23,13 @@ InstallMock = Callable[[Handler], list[httpx2.Request]]
 
 # 差し替え前の本物のクライアント。forbid_real_http で置き換わる前に捕まえておく。
 _REAL_ASYNC_CLIENT = httpx2.AsyncClient
+
+
+def content_text(result: types.CallToolResult) -> str:
+    """CallToolResult の先頭ブロックからテキストを取り出す。"""
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
 
 
 @pytest.fixture(autouse=True)

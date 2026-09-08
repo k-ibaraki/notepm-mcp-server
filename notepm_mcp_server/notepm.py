@@ -141,6 +141,21 @@ class SearchParams(BaseModel):
     ] = 10
 
 
+# page_code は詳細取得 URL のパス要素へそのまま埋め込まれる。httpx2 は URL を正規化する
+# 際にドットセグメントを解決するため、検証が無いと "../notes" でページ詳細以外の
+# エンドポイントへ、"abc?foo=1" で任意のクエリ付与へ到達できてしまう（Issue #5）。
+# パスの構造を変え得る文字だけを拒む方針とし、以下を受け付けない:
+#   空白類 / 制御文字(C0 0x00-0x1f・DEL 0x7f・C1 0x80-0x9f) /
+#   パス区切り(/ \) / ドット(.) / クエリ(?) / フラグメント(#) /
+#   スキーム区切り(:) / パーセント(%)
+# % を拒むのは、"%2e%2e%2fnotes" が /api/v1/pages/../notes として送出されるため。
+# ドットは "a.b" のように単独なら無害だが、".." だけを狙って除くと規則が読みにくく
+# なるため一律で拒む。これらに該当しない値は、日本語を含めて単一のパス要素に収まる。
+# \s は DATE_PATTERN の \d と同じくエンジン差が出るが、ずれるのは U+FEFF の 1 文字だけで、
+# 公開スキーマ(ECMA-262)のほうが厳しい向きになるため、そのままにしている。
+PAGE_CODE_PATTERN = r"^[^\s/\\.?#%:\x00-\x1f\x7f\x80-\x9f]+$"
+
+
 # SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
 # description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
 class NotePMDetailParams(BaseModel):
@@ -149,10 +164,12 @@ class NotePMDetailParams(BaseModel):
     page_code: Annotated[
         str,
         Field(
+            pattern=PAGE_CODE_PATTERN,
             description=(
                 "取得するページのページコード（例: aaaaad0001）。"
                 "notepm_search の検索結果に含まれる page_code をそのまま渡す。"
-            )
+                "空白・制御文字と / \\ . ? # % : は使えない。"
+            ),
         ),
     ]
 
@@ -233,6 +250,8 @@ class NotePMAPIClient:
             ValueError: APIリクエストが失敗した場合
         """
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
+        # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
+        # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._client.get(url, headers=headers)
 
@@ -308,6 +327,41 @@ def get_server_version() -> str:
         return ""
 
 
+async def call_notepm_tool(
+    config: NotePMConfig, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    """ツール呼び出しを実行し、結果を CallToolResult として返します
+
+    server.run(..., raise_exceptions=True) で起動しているため、ここで例外を送出すると
+    サーバー自体が停止します。異常は必ず is_error=True の結果として返してください。
+
+    Args:
+        config (NotePMConfig): API設定
+        params (types.CallToolRequestParams): ツール名と引数
+
+    Returns:
+        types.CallToolResult: ツールの実行結果。失敗時は is_error=True の結果。
+    """
+    arguments = params.arguments or {}
+    try:
+        if params.name == "notepm_search":
+            search_params = SearchParams(**arguments)
+            async with NotePMAPIClient(config) as client:
+                result = await client.search(search_params)
+        elif params.name == "notepm_page_detail":
+            detail_params = NotePMDetailParams(**arguments)
+            async with NotePMAPIClient(config) as client:
+                result = await client.get_notepm_page_detail(detail_params)
+        else:
+            raise ValueError(f"不明なツールです: {params.name}")
+    except Exception as e:
+        return types.CallToolResult(
+            content=[TextContent(type="text", text=str(e))], is_error=True
+        )
+
+    return types.CallToolResult(content=[TextContent(type="text", text=result)])
+
+
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
 
@@ -362,27 +416,9 @@ async def serve() -> None:
             params (types.CallToolRequestParams): ツール名と引数
 
         Returns:
-            types.CallToolResult: ツールの実行結果。失敗時は is_error=True の
-                結果を返す（例外を送出するとサーバー自体が停止するため）。
+            types.CallToolResult: ツールの実行結果
         """
-        arguments = params.arguments or {}
-        try:
-            if params.name == "notepm_search":
-                search_params = SearchParams(**arguments)
-                async with NotePMAPIClient(config) as client:
-                    result = await client.search(search_params)
-            elif params.name == "notepm_page_detail":
-                detail_params = NotePMDetailParams(**arguments)
-                async with NotePMAPIClient(config) as client:
-                    result = await client.get_notepm_page_detail(detail_params)
-            else:
-                raise ValueError(f"不明なツールです: {params.name}")
-        except Exception as e:
-            return types.CallToolResult(
-                content=[TextContent(type="text", text=str(e))], is_error=True
-            )
-
-        return types.CallToolResult(content=[TextContent(type="text", text=result)])
+        return await call_notepm_tool(config, params)
 
     server: Server[dict[str, Any]] = Server(
         "notepm-mcp",
