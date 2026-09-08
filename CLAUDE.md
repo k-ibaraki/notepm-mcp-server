@@ -39,7 +39,7 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - サーバーの組み立ては `create_server(config)` にあり、stdio への接続を含みません。テストは `mcp.client.Client` に渡して in-process で叩いています（`tests/test_server.py`）
 - ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
-- 検索応答は `_truncate_body_content()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は切り詰めません
+- 検索応答は `_truncate_search_bodies()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は意図的に切り詰めません（全文への経路を残すため。理由は `get_notepm_page_detail` の docstring に書いてあります）
 - `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します。設定ミスは起動時に気付けるべきなので、この失敗はそのまま落とします
 - `notepm` モジュールは import 時に `load_dotenv()` を呼びます
 
