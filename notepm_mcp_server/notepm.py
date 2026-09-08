@@ -141,6 +141,18 @@ class SearchParams(BaseModel):
     ] = 10
 
 
+# page_code は詳細取得 URL のパス要素へそのまま埋め込まれる。httpx2 は URL を正規化する
+# 際にドットセグメントを解決するため、検証が無いと "../notes" でページ詳細以外の
+# エンドポイントへ、"abc?foo=1" で任意のクエリ付与へ到達できてしまう（Issue #5）。
+# パスの構造を変え得る文字だけを拒む方針とし、以下を受け付けない:
+#   空白類・制御文字 / パス区切り(/ \) / ドット(.) / クエリ(?) / フラグメント(#) /
+#   スキーム区切り(:) / パーセント(%)
+# % を拒むのは、"%2e%2e%2fnotes" が /api/v1/pages/../notes として送出されるため。
+# ドットは "a.b" のように単独なら無害だが、".." だけを狙って除くと規則が読みにくく
+# なるため一律で拒む。これらに該当しない値は、日本語を含めて単一のパス要素に収まる。
+PAGE_CODE_PATTERN = r"^[^\s/\\.?#%:\x00-\x1f\x7f]+$"
+
+
 # SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
 # description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
 class NotePMDetailParams(BaseModel):
@@ -149,10 +161,12 @@ class NotePMDetailParams(BaseModel):
     page_code: Annotated[
         str,
         Field(
+            pattern=PAGE_CODE_PATTERN,
             description=(
                 "取得するページのページコード（例: aaaaad0001）。"
                 "notepm_search の検索結果に含まれる page_code をそのまま渡す。"
-            )
+                "空白・制御文字と / \\ . ? # % : は使えない。"
+            ),
         ),
     ]
 
@@ -233,6 +247,8 @@ class NotePMAPIClient:
             ValueError: APIリクエストが失敗した場合
         """
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
+        # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
+        # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._client.get(url, headers=headers)
 
