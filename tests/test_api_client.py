@@ -324,12 +324,39 @@ async def test_read_timeout_is_not_retried(
 
     requests = mock_api(handler)
 
-    # 全体の打ち切りに化けさせず、原因が分かる形のまま返す
-    with pytest.raises(httpx2.ReadTimeout):
+    # 全体の打ち切りに化けさせず、読み取りの時間切れだと分かる形に分類して返す
+    with pytest.raises(notepm.NotePMConnectionError) as error:
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
+    assert isinstance(error.value.__cause__, httpx2.ReadTimeout)
+    assert "ReadTimeout" in str(error.value)
     assert len(requests) == 1
+
+
+async def test_exhausted_connection_failures_are_classified(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """再試行を尽くしても接続できなければ、NotePMError の一種として返す。
+
+    httpx2 の例外をそのまま抜けさせると、呼び出し側では想定外の失敗と区別が付かず、
+    トレースバック付きの ERROR として記録されてしまう（Issue #34）。例外の文言には
+    サーバー由来の受信データが混ざり得るため、呼び出し側へは種別だけを渡す。
+    """
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("secret-detail", request=request)
+
+    requests = mock_api(handler)
+
+    with pytest.raises(notepm.NotePMConnectionError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    assert len(requests) == notepm.MAX_ATTEMPTS
+    assert isinstance(error.value.__cause__, httpx2.ConnectError)
+    assert "ConnectError" in str(error.value)
+    assert "secret-detail" not in str(error.value)
 
 
 async def test_detail_retries_transient_failure(

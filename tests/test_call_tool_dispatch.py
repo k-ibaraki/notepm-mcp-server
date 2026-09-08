@@ -140,6 +140,42 @@ async def test_api_failure_is_logged_as_a_warning(
     assert "リクエスト制限" in records[-1].getMessage()
 
 
+async def test_connection_failure_is_logged_as_a_warning(
+    config: notepm.NotePMConfig, mock_api: InstallMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """接続の失敗も相手側か経路の都合なので、警告に留めてトレースバックは付けない。
+
+    httpx2 の例外がそのまま抜けると想定外の失敗と同じ ERROR になり、本当の異常が
+    埋もれる（Issue #34）。
+    """
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused", request=request)
+
+    mock_api(handler)
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
+
+    assert result.is_error is True
+    # 呼び出し側には、待てば直り得る失敗だと分かるメッセージが届く
+    assert "再試行" in content_text(result)
+
+    # 再試行の警告に続いて、通信の失敗と分類済みの失敗が最後に残る。
+    # いずれも WARNING で、トレースバックは付けない。
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert records
+    assert [r.levelno for r in records] == [logging.WARNING] * len(records)
+    assert all(r.exc_info is None for r in records)
+    assert "通信" in records[-1].getMessage()
+
+
 async def test_unexpected_failure_keeps_the_traceback(
     config: notepm.NotePMConfig,
     mock_api: InstallMock,
