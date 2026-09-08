@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from mcp import types
 from mcp.client import Client
 from mcp.server import Server
 from mcp.shared.exceptions import MCPError
@@ -73,7 +74,7 @@ async def test_unexpected_exception_does_not_stop_the_server(
 
     async def explode(
         config: notepm.NotePMConfig, params: object
-    ) -> notepm.types.CallToolResult:
+    ) -> types.CallToolResult:
         calls.append("call")
         raise RuntimeError("想定外の失敗")
 
@@ -103,7 +104,7 @@ async def test_unknown_tool_returns_error_result(
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
         result = await notepm.call_notepm_tool(
             config,
-            notepm.types.CallToolRequestParams(name="notepm_unknown", arguments={}),
+            types.CallToolRequestParams(name="notepm_unknown", arguments={}),
         )
 
     assert result.is_error is True
@@ -111,6 +112,25 @@ async def test_unknown_tool_returns_error_result(
     assert [(r.levelno, r.exc_info is None) for r in records] == [
         (logging.WARNING, True)
     ]
+
+
+async def test_tool_name_cannot_forge_a_log_line(
+    config: notepm.NotePMConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ツール名は外部由来なので、改行を含んでいても 1 行に収める。
+
+    生のまま出すと、偽の ERROR 行を差し込んで本物の記録に見せかけられる。
+    """
+    forged = "x\nERROR:notepm_mcp_server.notepm:偽の行です"
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        result = await notepm.call_notepm_tool(
+            config, types.CallToolRequestParams(name=forged, arguments={})
+        )
+
+    assert result.is_error is True
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert "\n" not in records[0].getMessage()
 
 
 @pytest.mark.parametrize(

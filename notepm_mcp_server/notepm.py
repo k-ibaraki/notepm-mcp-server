@@ -375,16 +375,18 @@ async def call_notepm_tool(
             async with NotePMAPIClient(config) as client:
                 result = await client.get_notepm_page_detail(detail_params)
         else:
-            raise UnknownToolError(f"不明なツールです: {params.name}")
+            raise UnknownToolError(f"不明なツールです: {params.name!r}")
     except (ValidationError, UnknownToolError) as e:
         # 呼び出しの拒否は想定内。トレースバックは原因の特定に寄与せず、LLM が
         # 組み立てた値が届くたびに ERROR が並ぶと、本当の異常が埋もれる。
-        logger.warning("ツール %s の呼び出しを受け付けませんでした: %s", params.name, e)
+        # ツール名は検証されていない外部由来の値なので、%r で改行ごと落とす。
+        # 生のまま出すと、改行を含む名前で偽のログ行を作られる。
+        logger.warning("ツール %r の呼び出しを受け付けませんでした: %s", params.name, e)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
     except Exception as e:
-        logger.exception("ツール %s の実行に失敗しました", params.name)
+        logger.exception("ツール %r の実行に失敗しました", params.name)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
