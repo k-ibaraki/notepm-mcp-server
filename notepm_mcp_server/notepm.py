@@ -5,6 +5,7 @@ from mcp.types import Tool, TextContent
 from pydantic import BaseModel
 import httpx2
 import os
+from types import TracebackType
 from typing import Any, Optional
 from dotenv import load_dotenv
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -26,7 +27,7 @@ class NotePMConfig:
         max_body_length (int): 本文の最大文字数
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.team = os.getenv("NOTEPM_TEAM")
         self.api_token = os.getenv("NOTEPM_API_TOKEN")
         if not self.team or not self.api_token:
@@ -78,7 +79,7 @@ class NotePMAPIClient:
     コンテキストマネージャとして使用することで、リソースの適切な解放を保証します。
     """
 
-    def __init__(self, config: NotePMConfig):
+    def __init__(self, config: NotePMConfig) -> None:
         """
         Args:
             config (NotePMConfig): API設定
@@ -86,11 +87,16 @@ class NotePMAPIClient:
         self.config = config
         self._client = httpx2.AsyncClient()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "NotePMAPIClient":
         """非同期コンテキストマネージャのエントリーポイント"""
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """非同期コンテキストマネージャの終了処理
 
         HTTPクライアントのリソースを適切に解放します。
@@ -157,11 +163,11 @@ class NotePMAPIClient:
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}")
 
-    def _truncate_body_content(self, data: dict, max_length: int = 1000) -> None:
+    def _truncate_body_content(self, data: Any, max_length: int = 1000) -> None:
         """レスポンスデータの本文部分を指定された文字数で省略します
 
         Args:
-            data (dict): NotePM APIのレスポンスデータ
+            data (Any): NotePM APIのレスポンスデータ（JSONデコード結果）
             max_length (int): 本文の最大文字数 (デフォルト: 1000)
         """
 
