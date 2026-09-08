@@ -391,9 +391,12 @@ class NotePMAPIClient:
         )
         logger.debug("NotePM API から応答を受け取りました: status=%s", response.status_code)
 
+        # チーム名が誤っているときに 404 が返るのかは実 API で確かめていない。
+        # NotePM のドキュメントも 404 を「存在しない URL」としか説明していないため、
+        # 手掛かりとして添えるに留め、原因は断定しない。
         _raise_for_status(
             response,
-            "NotePM API の検索エンドポイントが見つかりません (HTTP 404)。"
+            "NotePM API が対象を見つけられませんでした (HTTP 404)。"
             "NOTEPM_TEAM の値が正しいかを確認してください。",
         )
 
