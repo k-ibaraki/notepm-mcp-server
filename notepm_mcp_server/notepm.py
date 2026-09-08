@@ -344,7 +344,7 @@ class NotePMAPIClient:
         except asyncio.TimeoutError as e:
             raise ValueError(
                 "NotePM APIからのデータ取得に失敗しました: "
-                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に応答がありませんでした"
+                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に結果を得られませんでした"
             ) from e
 
     async def _get_with_retry(

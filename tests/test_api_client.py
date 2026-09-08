@@ -239,7 +239,7 @@ async def test_search_stops_at_the_total_timeout(
 
     mock_api(never_answers)
 
-    with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+    with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
@@ -259,7 +259,7 @@ async def test_total_timeout_also_bounds_the_retry_waits(
 
     requests = mock_api(lambda request: httpx2.Response(503, text="Unavailable"))
 
-    with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+    with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
@@ -286,7 +286,7 @@ async def test_client_survives_a_total_timeout(
     mock_api(slow_then_fast)
 
     async with notepm.NotePMAPIClient(config) as client:
-        with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+        with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
             await client.search(notepm.SearchParams(q="遅い"))
 
         result = await client.search(notepm.SearchParams(q="速い"))
