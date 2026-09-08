@@ -8,18 +8,19 @@ license = "MIT"
 requires-python = ">=3.10"
 # 上限を明示すること。上限が無いと、uv.lock を参照しないインストール経路
 # (uvx / pip install git+... など) で起動時に破壊的変更を含む最新版を取得してしまう。
-# 例: mcp 2.0.0 で mcp.server.lowlevel.server.request_ctx が削除された。
+# 例: mcp 2.0.0 は低レベルサーバのハンドラ登録方式を全面的に差し替えた。
+# 更新時は上限を外さず、レンジごと引き上げること。
 dependencies = [
     "click>=8.1.0,<9",
-    "httpx>=0.28.1,<1",
-    "mcp[cli]>=1.6.0,<2",
-    "pydantic>=2.0.0,<3",
+    "httpx2>=2.12.0,<3",
+    "mcp>=2.2.0,<3",
+    "pydantic>=2.12.0,<3",
     "python-dotenv>=1.1.0,<2",
 ]
 
 [dependency-groups]
 dev = [
-    "mypy>=1.15.0,<2",
+    "mypy>=2.0.0,<3",
 ]
 
 [project.scripts]
