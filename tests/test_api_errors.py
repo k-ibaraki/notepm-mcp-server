@@ -204,10 +204,10 @@ async def test_api_token_never_reaches_the_logs(
     """-vv 相当の水準でも、API トークンはどのロガーにも出ない。
 
     ルートロガーで受けるのは、-vv が logging.basicConfig でルートの水準を下げ、依存
-    ライブラリのログもまとめて出るようになるため。ただし MockTransport は httpcore2 の
-    層を通らないので、ここで押さえられるのはこのサーバー自身の出力だけである。
-    httpx2 は method と URL とステータスしか出さず、httpcore2 の Trace が DEBUG で出す
-    Request の repr にもヘッダは含まれない（いずれも実装を読んで確認した）。
+    ライブラリのログもまとめて出るようになるため。このサーバー自身の出力に加えて、
+    httpx2 がクライアント層で出す 1 行（method と URL とステータス）もここに含まれる。
+    届かないのは MockTransport が飛ばす httpcore2 の層だけで、そちらは Trace が DEBUG で
+    出す Request の repr にヘッダを含まないことを実装で確認している。
     """
     mock_api(lambda request: httpx2.Response(401, text="Unauthorized"))
 

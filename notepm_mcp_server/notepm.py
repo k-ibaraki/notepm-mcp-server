@@ -353,9 +353,9 @@ def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> N
     """成功以外のステータスを、原因ごとの例外に振り分けて送出します
 
     分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
-    400 / 401 / 404 / 429 / 500 に合わせています。403 は記載がありませんが、権限不足を
-    401 と分けて返す実装もあり得るため認証側に寄せています。記載の無いステータスは
-    推測せず、汎用の NotePMAPIError のままにします。
+    400 / 401 / 404 / 429 / 500 を土台に、HTTP の標準的な意味で読める範囲まで広げて
+    います（権限不足の 403 を認証側へ、500 番台の全体を NotePM 側の失敗として扱う）。
+    そこから外れるステータスは意味を推測せず、汎用の NotePMAPIError のままにします。
 
     Args:
         response (httpx2.Response): API の応答
@@ -423,6 +423,9 @@ def _load_json_response(response: httpx2.Response) -> Any:
         return json.loads(response.text)
     except json.JSONDecodeError as e:
         _log_failed_response_body("JSON として解釈できなかった応答", response)
+        # 解釈に失敗した位置と理由は返すメッセージには載せない（利用者には手の出しよう
+        # がない）。運用者が追えるよう、本文と同じ水準で残す。
+        logger.debug("JSON の解釈に失敗しました: %s", e)
         raise NotePMResponseError(
             "NotePM API の応答を JSON として解釈できませんでした。"
             "NotePM 側がメンテナンス中などで、JSON 以外を返している可能性があります。"
