@@ -80,6 +80,42 @@ async def test_detail_not_found_names_the_page_code(
     assert "missing0001" in str(error.value)
 
 
+async def test_detail_bad_request_names_the_page_code(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """詳細取得の 400 も、どのページコードで失敗したのかを伝える。
+
+    実 API は存在しない page_code に 404 ではなく 400 を返す（Issue #31）。ここが
+    一般的な文言のままだと、呼び出し側は次に何を試せばよいのか読み取れない。
+    """
+    mock_api(lambda request: httpx2.Response(400, text="権限がありません"))
+
+    with pytest.raises(notepm.NotePMBadRequestError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.get_notepm_page_detail(
+                notepm.NotePMDetailParams(page_code="missing0001")
+            )
+
+    message = str(error.value)
+    assert "missing0001" in message
+    # NotePM が存在しないページと権限不足を区別しないため、こちらも断定しない。
+    assert "存在しない" in message
+    assert "権限" in message
+
+
+async def test_search_bad_request_stays_generic(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """検索の 400 は一般的な文言のまま。page_code のような手掛かりを持たないため。"""
+    mock_api(lambda request: httpx2.Response(400, text="エラーの詳細"))
+
+    with pytest.raises(notepm.NotePMBadRequestError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    assert "指定したパラメータの値を見直してください" in str(error.value)
+
+
 async def test_unclassified_status_stays_generic(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:

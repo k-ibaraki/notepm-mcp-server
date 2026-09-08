@@ -388,7 +388,12 @@ def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
     logger.debug("%s: body=%r", summary, response.text[:ERROR_BODY_LOG_LIMIT])
 
 
-def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> None:
+def _raise_for_status(
+    response: httpx2.Response,
+    *,
+    not_found_message: str,
+    bad_request_message: str | None = None,
+) -> None:
     """成功以外のステータスを、原因ごとの例外に振り分けて送出します
 
     分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
@@ -400,6 +405,9 @@ def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> N
         response (httpx2.Response): API の応答
         not_found_message (str): 404 のときのメッセージ。404 は「存在しない URL」を
             表すだけで、何が見つからないのかは呼び出し元しか知らないため受け取ります。
+        bad_request_message (str | None): 400 のときのメッセージ。省略すると、どの
+            パラメータとも結び付かない一般的な文言を使います。渡す場合は、呼び出し元が
+            ステータスまで含めた文面を組み立ててください。
 
     Raises:
         NotePMAPIError: ステータスが 200 以外の場合。原因により派生クラスを送出します。
@@ -421,8 +429,11 @@ def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> N
         )
     if status == 400:
         raise NotePMBadRequestError(
-            f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
-            "指定したパラメータの値を見直してください。",
+            bad_request_message
+            or (
+                f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
+                "指定したパラメータの値を見直してください。"
+            ),
             status,
         )
     if status == 404:
@@ -656,12 +667,24 @@ class NotePMAPIClient:
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._get(url)
 
+        # 400 にも文面を渡すのは、実 API が存在しない page_code に対して 404 ではなく
+        # 400 (本文は {"messages":["権限がありません"]}) を返すためである（Issue #31）。
+        # 一般的な「パラメータを見直してください」だけでは、どのページで失敗したのかも、
+        # 存在しないのか権限が無いのかも呼び出し側に伝わらない。NotePM 側が両者を
+        # 区別しないので、こちらも断定せず両方の可能性を挙げる。404 の分岐は残す。
+        # 実 API で 404 が返らないと確かめたわけではないためである。
         _raise_for_status(
             response,
             not_found_message=(
                 f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
                 "notepm_search の検索結果に含まれる page_code を渡しているか、"
                 "そのページが削除されていないかを確認してください。"
+            ),
+            bad_request_message=(
+                f"指定されたページを取得できません (HTTP 400): page_code={params.page_code}。"
+                "そのページが存在しないか、API トークンに読む権限が無い可能性があります。"
+                "notepm_search の検索結果に含まれる page_code を渡しているかを"
+                "確認してください。"
             ),
         )
 
