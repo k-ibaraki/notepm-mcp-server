@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from typing import Any
 
 import httpx2
 import pytest
@@ -187,6 +188,29 @@ async def test_requests_carry_the_configured_timeout(
     assert requests[0].extensions["timeout"] == notepm.HTTP_TIMEOUT.as_dict()
     # 全文検索は時間がかかり得るので、読み取りだけは既定より長く取っている
     assert notepm.HTTP_TIMEOUT.read == 30.0
+
+
+async def test_client_is_built_with_the_configured_limits(
+    config: notepm.NotePMConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接続数と keepalive も既定任せにしない。
+
+    httpx2 は limits を公開しないため、生成時の引数で確かめるほかない。
+    渡し忘れると keepalive が既定の 5 秒に戻り、接続の再利用が静かに効かなくなる。
+    """
+    factory = notepm.httpx2.AsyncClient
+    captured: list[dict[str, Any]] = []
+
+    def recording_factory(**kwargs: Any) -> httpx2.AsyncClient:
+        captured.append(kwargs)
+        return factory(**kwargs)
+
+    monkeypatch.setattr(notepm.httpx2, "AsyncClient", recording_factory)
+
+    async with notepm.NotePMAPIClient(config):
+        pass
+
+    assert captured[0]["limits"] is notepm.HTTP_LIMITS
 
 
 async def test_search_retries_rate_limited_response(
