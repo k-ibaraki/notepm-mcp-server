@@ -7,6 +7,7 @@ import httpx2
 import os
 from typing import Any, Optional
 from dotenv import load_dotenv
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 
 # 環境変数の読み込み
@@ -202,6 +203,20 @@ def get_tool_description(env_var_name: str, default_description: str) -> str:
     """
     return os.getenv(env_var_name, default_description)
 
+
+def get_server_version() -> str:
+    """自身のパッケージバージョンを返す
+
+    Returns:
+        str: インストール済みの notepm-mcp-server のバージョン。
+            未インストールのまま実行された場合は空文字列。
+    """
+    try:
+        return package_version("notepm-mcp-server")
+    except PackageNotFoundError:
+        return ""
+
+
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
 
@@ -280,6 +295,7 @@ async def serve() -> None:
 
     server: Server[dict[str, Any]] = Server(
         "notepm-mcp",
+        version=get_server_version(),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )
