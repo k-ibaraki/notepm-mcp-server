@@ -37,6 +37,9 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - ツールの異常は `CallToolResult(is_error=True)` で返します。ツール実行の本体は `call_notepm_tool()` にあり、そこで例外を捕捉してこの形に変換します。`on_call_tool` は委譲するだけです。この捕捉があるため、ツール実行中の例外は `NOTEPM_RAISE_EXCEPTIONS` の設定に関わらず再送出されません
 - 捕捉した例外のログは原因で水準を分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。拒否は防御が働いた結果なので、本当の異常と同じ水準にはしません
 - サーバーの組み立ては `create_server(config)` にあり、stdio への接続を含みません。テストは `mcp.client.Client` に渡して in-process で叩いています（`tests/test_server.py`）
+- HTTP クライアントは `create_server()` の lifespan がサーバーの生存期間にひとつだけ持ちます。`server.run()` の内側で開き、抜けるときに閉じます。ツール呼び出しは `ctx.lifespan_context` から受け取ります。呼び出しごとに作り直すと、TLS ハンドシェイクとコネクションプールが毎回捨てられます（Issue #10）
+- タイムアウトと接続数は `HTTP_TIMEOUT` / `HTTP_LIMITS` にコード定数として明示しています。環境変数では変えません。`keepalive_expiry` を既定の 5 秒から伸ばしているのは、検索から詳細取得までの間に呼び出し側の思考時間が挟まるためです
+- 再試行は `NotePMAPIClient._get()` にあり、待てば結果が変わり得る失敗だけを対象にします（`RETRYABLE_STATUS_CODES` と `RETRYABLE_TRANSPORT_ERRORS`、最大 `MAX_ATTEMPTS` 回）。`ReadTimeout` は待ち時間が試行回数の分だけ積み上がるため含めません。`Retry-After` は秒数として読めるときだけ従い、`MAX_RETRY_WAIT_SECONDS` で丸めます。再試行のログには状態コードと試行回数だけを残し、応答本文は出しません
 - ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
 - 検索応答は `_truncate_body_content()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は切り詰めません
@@ -56,4 +59,5 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 ## テスト
 
 - HTTP は `httpx2` の `MockTransport` に差し替えます。新しいテストは `tests/conftest.py` の `mock_api` フィクスチャを使ってください
-- autouse のフィクスチャが、モックを介さない HTTP クライアントの生成を失敗させ、`NOTEPM_` 系の環境変数も毎回削除します。手元の `.env` に結果が左右されない前提を壊さないでください
+- autouse のフィクスチャが、モックを介さない HTTP リクエストの送信を失敗させ、`NOTEPM_` 系の環境変数も毎回削除します。手元の `.env` に結果が左右されない前提を壊さないでください。クライアントの生成自体は lifespan が毎回行うため、禁じているのは送信のほうです
+- 同じく autouse の `no_retry_waits` が再試行の待ち時間を 0 にします。待ち時間の決め方そのものは `tests/test_retry_policy.py` で固定しています
