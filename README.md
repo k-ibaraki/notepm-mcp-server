@@ -118,6 +118,35 @@ NOTEPM_TEAM=your-team-name
 NOTEPM_API_TOKEN=your-api-token
 ```
 
+### 任意の環境変数
+
+- `NOTEPM_MAX_BODY_LENGTH`: 検索結果の本文を切り詰める文字数（既定: 200）
+- `NOTEPM_SEARCH_DESCRIPTION` / `NOTEPM_PAGE_DETAIL_DESCRIPTION`: ツールの説明文の差し替え
+- `NOTEPM_RAISE_EXCEPTIONS`: デバッグ用。`1` / `true` / `yes` / `on` のいずれかで有効
+
+`NOTEPM_RAISE_EXCEPTIONS` を有効にすると、ハンドラを抜けた例外がそのまま送出され、
+サーバープロセスが停止します。原因の切り分けには便利ですが、常駐させる通常の運用では
+設定しないでください。既定の無効のままなら、想定外の例外はクライアントへのエラー応答に
+変換され、サーバーは動き続けます。
+
+なお、ツール実行中の例外は `call_notepm_tool()` が捕捉して `isError` の結果に変換するため、
+このフラグの影響を受けません。フラグが効くのは、ツール一覧の取得など、ハンドラの外へ
+例外が抜ける経路だけです。
+
+### ログ
+
+ログは stderr に出力します（stdout は JSON-RPC が使うため）。既定では警告以上のみで、
+`-v` で INFO、`-vv` で DEBUG まで下がります。
+
+想定外の失敗はトレースバック付きで記録します。一方、検証や未知のツール名で弾いた
+呼び出しは防御が働いた結果なので、値だけを警告として残します。
+
+```sh
+uv run notepm-mcp-server -v
+```
+
+MCP クライアント経由で起動している場合、この出力はクライアント側のログに記録されます。
+
 ## 使用方法
 
 ### サーバーの起動
