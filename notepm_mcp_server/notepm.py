@@ -1,10 +1,11 @@
-from mcp.server import Server
+from mcp import types
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 from pydantic import BaseModel
-import httpx
+import httpx2
 import os
-from typing import Optional
+from typing import Any, Optional
 from dotenv import load_dotenv
 import json
 
@@ -82,7 +83,7 @@ class NotePMAPIClient:
             config (NotePMConfig): API設定
         """
         self.config = config
-        self._client = httpx.AsyncClient()
+        self._client = httpx2.AsyncClient()
 
     async def __aenter__(self):
         """非同期コンテキストマネージャのエントリーポイント"""
@@ -208,7 +209,6 @@ async def serve() -> None:
     他のプロセスとコマンド通信を行います。
     """
     config = NotePMConfig()
-    server: Server = Server("notepm-mcp")
 
     # ツールの説明文のデフォルト値
     default_search_description = """
@@ -218,51 +218,71 @@ async def serve() -> None:
                     記事の本文が長い場合は、本文の全文が返されないことがあります。
                     全文を取得するには、notepm_page_detailを使用してください。
                 """
-    
+
     default_detail_description = "NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。"
 
-    @server.list_tools()
-    async def list_tools() -> list[Tool]:
+    async def on_list_tools(
+        ctx: ServerRequestContext[dict[str, Any]],
+        params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
         """利用可能なツールのリストを返します"""
-        return [
-            Tool(
-                name="notepm_search",
-                description=get_tool_description("NOTEPM_SEARCH_DESCRIPTION", default_search_description),
-                inputSchema=SearchParams.model_json_schema(),
-            ),
-            Tool(
-                name="notepm_page_detail",
-                description=get_tool_description("NOTEPM_PAGE_DETAIL_DESCRIPTION", default_detail_description),
-                inputSchema=NotePMDetailParams.model_json_schema(),
-            ),
-        ]
+        return types.ListToolsResult(
+            tools=[
+                Tool(
+                    name="notepm_search",
+                    description=get_tool_description(
+                        "NOTEPM_SEARCH_DESCRIPTION", default_search_description
+                    ),
+                    input_schema=SearchParams.model_json_schema(),
+                ),
+                Tool(
+                    name="notepm_page_detail",
+                    description=get_tool_description(
+                        "NOTEPM_PAGE_DETAIL_DESCRIPTION", default_detail_description
+                    ),
+                    input_schema=NotePMDetailParams.model_json_schema(),
+                ),
+            ]
+        )
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def on_call_tool(
+        ctx: ServerRequestContext[dict[str, Any]],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
         """クライアントからのツール呼び出しを処理します
 
         Args:
-            name (str): 呼び出すツールの名前
-            arguments (dict): ツールに渡す引数
+            ctx (ServerRequestContext): リクエストごとのコンテキスト
+            params (types.CallToolRequestParams): ツール名と引数
 
         Returns:
-            list[TextContent]: ツールの実行結果
-
-        Raises:
-            ValueError: 不明なツールが指定された場合
+            types.CallToolResult: ツールの実行結果。失敗時は is_error=True の
+                結果を返す（例外を送出するとサーバー自体が停止するため）。
         """
-        if name == "notepm_search":
-            search_params: SearchParams = SearchParams(**arguments)
-            async with NotePMAPIClient(config) as client:
-                result = await client.search(search_params)
-                return [TextContent(type="text", text=result)]
-        elif name == "notepm_page_detail":
-            detail_params: NotePMDetailParams = NotePMDetailParams(**arguments)
-            async with NotePMAPIClient(config) as client:
-                result = await client.get_notepm_page_detail(detail_params)
-                return [TextContent(type="text", text=result)]
+        arguments = params.arguments or {}
+        try:
+            if params.name == "notepm_search":
+                search_params = SearchParams(**arguments)
+                async with NotePMAPIClient(config) as client:
+                    result = await client.search(search_params)
+            elif params.name == "notepm_page_detail":
+                detail_params = NotePMDetailParams(**arguments)
+                async with NotePMAPIClient(config) as client:
+                    result = await client.get_notepm_page_detail(detail_params)
+            else:
+                raise ValueError(f"不明なツールです: {params.name}")
+        except Exception as e:
+            return types.CallToolResult(
+                content=[TextContent(type="text", text=str(e))], is_error=True
+            )
 
-        raise ValueError(f"不明なツールです: {name}")
+        return types.CallToolResult(content=[TextContent(type="text", text=result)])
+
+    server: Server[dict[str, Any]] = Server(
+        "notepm-mcp",
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+    )
 
     # サーバーの初期化オプションを作成
     options = server.create_initialization_options()
