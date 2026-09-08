@@ -387,7 +387,12 @@ class NotePMTimeoutError(NotePMError):
 
 
 class NotePMConnectionError(NotePMError):
-    """接続や送受信の途中で失敗し、応答を得られなかったときのエラー"""
+    """接続や送受信の途中で失敗し、応答を得られなかったときのエラー
+
+    httpx2 の TransportError をまとめて受けるため、接続できなかった場合だけでなく、
+    読み取りの時間切れ（ReadTimeout）もここへ入ります。呼び出し全体の上限時間での
+    打ち切りは NotePMTimeoutError で別に扱います。
+    """
 
 
 def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
@@ -556,7 +561,7 @@ class NotePMAPIClient:
 
         Raises:
             NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
-            NotePMConnectionError: 最後の試行でも接続や送受信に失敗した場合
+            NotePMConnectionError: 接続や送受信の途中で失敗した場合
         """
         # 発行するリクエストは -vv でだけ残す。検索語は dict のまま渡すので値が repr に
         # なり、page_code は PAGE_CODE_PATTERN で検証済みなので、どちらも改行で偽のログ行
