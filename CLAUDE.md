@@ -35,7 +35,10 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 - MCP の低レベルサーバは `mcp` 2.x の注入方式（`Server(on_list_tools=..., on_call_tool=...)`）で使います。1.x のデコレータ方式（`@server.list_tools`）は廃止済みで、移行時に書き換えた経緯があります
 - `server.run()` の `raise_exceptions` は既定で無効です。ハンドラを抜けた例外は SDK 側でエラー応答に変換され、トレースバックが stderr のログに残ります。`NOTEPM_RAISE_EXCEPTIONS=1` を渡したときだけ再送出され、その場合は **例外がプロセスごとサーバーを停止させます**。デバッグ専用の切り替えで、常駐運用では有効にしません
 - ツールの異常は `CallToolResult(is_error=True)` で返します。ツール実行の本体は `call_notepm_tool()` にあり、そこで例外を捕捉してこの形に変換します。`on_call_tool` は委譲するだけです。この捕捉があるため、ツール実行中の例外は `NOTEPM_RAISE_EXCEPTIONS` の設定に関わらず再送出されません
-- 捕捉した例外のログは原因で水準を分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。拒否は防御が働いた結果なので、本当の異常と同じ水準にはしません
+- NotePM API 由来の失敗は `NotePMError` の階層に分類します。振り分けは `_raise_for_status()` にあり、401 / 403 は `NotePMAuthError`、400 は `NotePMBadRequestError`、404 は `NotePMNotFoundError`、429 は `NotePMRateLimitError`、5xx は `NotePMServerError` です。分類は NotePM の API ドキュメントが挙げるステータスに合わせてあり、記載の無いステータスは推測せず `NotePMAPIError` のままにします。JSON として読めない応答だけは `NotePMResponseError` で、ステータス由来の失敗と分けています
+- エラーメッセージには応答本文も API トークンも載せません。本文の中身は NotePM 側の都合で決まり、そのまま返すとクライアントの記録や LLM の文脈へ制御できない内容が流れ出るためです。本文は `_log_failed_response_body()` が DEBUG のときだけ、`%r` で先頭 `ERROR_BODY_LOG_LIMIT` 文字まで残します
+- 捕捉した例外のログは原因で三段に分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）と NotePM API 由来の失敗（`NotePMError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。前の二つは防御が働いた結果か相手側の都合であって、本当の異常と同じ水準にはしません
+- ログの水準は `-v` の回数で決めます。対応づけは `notepm_mcp_server/__init__.py` の `resolve_log_level()` にあり、`logging.basicConfig()` でルートロガーへ設定するため依存ライブラリのログも同じ水準で出ます。INFO ではサーバーの起動・終了とツール呼び出しの開始・完了を、DEBUG では発行する URL とクエリ、応答のステータス、失敗した応答の本文を出します
 - サーバーの組み立ては `create_server(config)` にあり、stdio への接続を含みません。テストは `mcp.client.Client` に渡して in-process で叩いています（`tests/test_server.py`）
 - ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
