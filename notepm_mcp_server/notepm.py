@@ -2,7 +2,7 @@ from mcp import types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 import httpx2
 import os
 from types import TracebackType
@@ -10,9 +10,15 @@ from typing import Annotated, Any, Literal, Optional
 from dotenv import load_dotenv
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
+import logging
 
 # 環境変数の読み込み
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# 真として扱う環境変数の値。大文字小文字は区別しない。
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 class NotePMConfig:
@@ -25,6 +31,7 @@ class NotePMConfig:
         api_token (str): NotePM APIのトークン
         api_base (str): APIのベースURL
         max_body_length (int): 本文の最大文字数
+        raise_exceptions (bool): ハンドラの例外を再送出するか（開発時のみ有効にする）
     """
 
     def __init__(self) -> None:
@@ -36,6 +43,13 @@ class NotePMConfig:
 
         # 本文の最大文字数を環境変数から取得（デフォルト: 200）
         self.max_body_length = int(os.getenv("NOTEPM_MAX_BODY_LENGTH", "200"))
+
+        # 例外の再送出はデバッグ用。有効にすると想定外の例外でサーバーが停止するため、
+        # 常駐する通常起動では無効のままにする（デフォルト: 無効）。
+        self.raise_exceptions = (
+            os.getenv("NOTEPM_RAISE_EXCEPTIONS", "").strip().lower()
+            in _TRUTHY_ENV_VALUES
+        )
 
 
 # NotePM API が日付の絞り込みで受け付ける書式（YYYY-MM-DD）。
@@ -327,13 +341,21 @@ def get_server_version() -> str:
         return ""
 
 
+class UnknownToolError(ValueError):
+    """公開していないツール名で呼び出されたときのエラー"""
+
+
 async def call_notepm_tool(
     config: NotePMConfig, params: types.CallToolRequestParams
 ) -> types.CallToolResult:
     """ツール呼び出しを実行し、結果を CallToolResult として返します
 
-    server.run(..., raise_exceptions=True) で起動しているため、ここで例外を送出すると
-    サーバー自体が停止します。異常は必ず is_error=True の結果として返してください。
+    異常は例外を送出せず、必ず is_error=True の結果として返します。ツールの失敗は
+    クライアントが読める応答であるべきで、JSON-RPC のエラーにする必要がないためです。
+
+    ログの水準は原因で分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
+    未知のツール名）は防御が働いた結果でサーバーの不具合ではないため、警告として
+    値だけを残します。それ以外は想定外の失敗なので、トレースバック付きで記録します。
 
     Args:
         config (NotePMConfig): API設定
@@ -353,8 +375,16 @@ async def call_notepm_tool(
             async with NotePMAPIClient(config) as client:
                 result = await client.get_notepm_page_detail(detail_params)
         else:
-            raise ValueError(f"不明なツールです: {params.name}")
+            raise UnknownToolError(f"不明なツールです: {params.name}")
+    except (ValidationError, UnknownToolError) as e:
+        # 呼び出しの拒否は想定内。トレースバックは原因の特定に寄与せず、LLM が
+        # 組み立てた値が届くたびに ERROR が並ぶと、本当の異常が埋もれる。
+        logger.warning("ツール %s の呼び出しを受け付けませんでした: %s", params.name, e)
+        return types.CallToolResult(
+            content=[TextContent(type="text", text=str(e))], is_error=True
+        )
     except Exception as e:
+        logger.exception("ツール %s の実行に失敗しました", params.name)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
@@ -362,24 +392,32 @@ async def call_notepm_tool(
     return types.CallToolResult(content=[TextContent(type="text", text=result)])
 
 
-async def serve() -> None:
-    """MCPサーバーのメインエントリーポイント
+# ツールの説明文のデフォルト値。環境変数で上書きできる（get_tool_description を参照）。
+DEFAULT_SEARCH_DESCRIPTION = """
+NotePM(ノートPM)で指定されたクエリを検索します。
+検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
+検索結果はJSON形式で返されます。
+記事の本文が長い場合は、本文の全文が返されないことがあります。
+全文を取得するには、notepm_page_detailを使用してください。
+"""
 
-    NotePM検索機能を提供するMCPサーバーを起動し、標準入出力を使用して
-    他のプロセスとコマンド通信を行います。
+DEFAULT_DETAIL_DESCRIPTION = (
+    "NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。"
+)
+
+
+def create_server(config: NotePMConfig) -> Server[dict[str, Any]]:
+    """ツールを登録した MCP サーバーを組み立てます
+
+    stdio への接続を含まないため、テストからは in-process のクライアントで
+    そのまま叩けます。
+
+    Args:
+        config (NotePMConfig): API設定
+
+    Returns:
+        Server[dict[str, Any]]: 起動可能な状態のサーバー
     """
-    config = NotePMConfig()
-
-    # ツールの説明文のデフォルト値
-    default_search_description = """
-                    NotePM(ノートPM)で指定されたクエリを検索します。
-                    検索ワードは単語のAND検索です。自然言語での検索はサポートされていません。
-                    検索結果はJSON形式で返されます。
-                    記事の本文が長い場合は、本文の全文が返されないことがあります。
-                    全文を取得するには、notepm_page_detailを使用してください。
-                """
-
-    default_detail_description = "NotePM(ノートPM)で指定されたページコードの記事に対して詳細な内容を取得します。"
 
     async def on_list_tools(
         ctx: ServerRequestContext[dict[str, Any]],
@@ -391,14 +429,14 @@ async def serve() -> None:
                 Tool(
                     name="notepm_search",
                     description=get_tool_description(
-                        "NOTEPM_SEARCH_DESCRIPTION", default_search_description
+                        "NOTEPM_SEARCH_DESCRIPTION", DEFAULT_SEARCH_DESCRIPTION
                     ),
                     input_schema=SearchParams.model_json_schema(),
                 ),
                 Tool(
                     name="notepm_page_detail",
                     description=get_tool_description(
-                        "NOTEPM_PAGE_DETAIL_DESCRIPTION", default_detail_description
+                        "NOTEPM_PAGE_DETAIL_DESCRIPTION", DEFAULT_DETAIL_DESCRIPTION
                     ),
                     input_schema=NotePMDetailParams.model_json_schema(),
                 ),
@@ -420,15 +458,30 @@ async def serve() -> None:
         """
         return await call_notepm_tool(config, params)
 
-    server: Server[dict[str, Any]] = Server(
+    return Server(
         "notepm-mcp",
         version=get_server_version(),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )
 
+
+async def serve() -> None:
+    """MCPサーバーのメインエントリーポイント
+
+    NotePM検索機能を提供するMCPサーバーを起動し、標準入出力を使用して
+    他のプロセスとコマンド通信を行います。
+    """
+    config = NotePMConfig()
+    server = create_server(config)
+
     # サーバーの初期化オプションを作成
     options = server.create_initialization_options()
     # 標準入出力を使用してサーバーを起動
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, options, raise_exceptions=True)
+        await server.run(
+            read_stream,
+            write_stream,
+            options,
+            raise_exceptions=config.raise_exceptions,
+        )

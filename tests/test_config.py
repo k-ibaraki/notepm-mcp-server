@@ -51,3 +51,34 @@ def test_max_body_length_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("NOTEPM_MAX_BODY_LENGTH", "50")
 
     assert notepm.NotePMConfig().max_body_length == 50
+
+
+def test_raise_exceptions_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOTEPM_TEAM", TEAM)
+    monkeypatch.setenv("NOTEPM_API_TOKEN", API_TOKEN)
+
+    assert notepm.NotePMConfig().raise_exceptions is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("1", True, id="1"),
+        pytest.param("true", True, id="true"),
+        pytest.param("TRUE", True, id="大文字のtrue"),
+        pytest.param(" yes ", True, id="前後に空白のyes"),
+        pytest.param("on", True, id="on"),
+        pytest.param("0", False, id="0"),
+        pytest.param("false", False, id="false"),
+        pytest.param("", False, id="空文字"),
+        pytest.param("maybe", False, id="解釈できない値"),
+    ],
+)
+def test_raise_exceptions_reads_env(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("NOTEPM_TEAM", TEAM)
+    monkeypatch.setenv("NOTEPM_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("NOTEPM_RAISE_EXCEPTIONS", value)
+
+    assert notepm.NotePMConfig().raise_exceptions is expected

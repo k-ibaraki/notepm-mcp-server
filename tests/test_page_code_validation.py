@@ -6,6 +6,7 @@ MCP のツール引数は LLM が組み立てる以上、外部から混入し�
 """
 
 import json
+import logging
 
 import httpx2
 import pytest
@@ -232,3 +233,28 @@ async def test_accepted_values_never_leave_the_page_detail_path(
     assert violations == []
     # 候補が全部弾かれていると、上の表明は何も確かめていないことになる
     assert accepted > 0
+
+
+async def test_rejection_is_logged_as_a_warning_without_a_traceback(
+    config: notepm.NotePMConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """拒否は防御が働いた結果であり、サーバーの異常として記録しない。
+
+    LLM が組み立てた値が届くたびに ERROR とトレースバックが並ぶと、運用時に
+    本当の異常が埋もれる。値だけを警告として残す。
+    """
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        result = await notepm.call_notepm_tool(
+            config,
+            types.CallToolRequestParams(
+                name="notepm_page_detail", arguments={"page_code": "../notes"}
+            ),
+        )
+
+    assert result.is_error is True
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [(r.levelno, r.exc_info is None) for r in records] == [
+        (logging.WARNING, True)
+    ]
+    # どの値が弾かれたかは追える
+    assert "page_code" in records[0].getMessage()
