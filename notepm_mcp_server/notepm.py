@@ -378,11 +378,18 @@ class NotePMAPIClient:
             NotePMResponseError: 応答をJSONとして解釈できなかった場合
         """
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
+        query = params.model_dump(exclude_none=True)  # Noneの値を除外してパラメータを構築
+        # 検索語は外部から届く値だが、dict の文字列化は値を repr にするため、改行を
+        # 含んでいても 1 行に収まる。headers は Authorization を含むので出さない。
+        logger.debug(
+            "NotePM API を検索します: GET %s params=%s", self.config.api_base, query
+        )
         response = await self._client.get(
             self.config.api_base,
-            params=params.model_dump(exclude_none=True),  # Noneの値を除外してパラメータを構築
+            params=query,
             headers=headers,
         )
+        logger.debug("NotePM API から応答を受け取りました: status=%s", response.status_code)
 
         _raise_for_status(
             response,
@@ -418,7 +425,11 @@ class NotePMAPIClient:
         # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
         # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
         url = f"{self.config.api_base}/{params.page_code}"
+        # 同じ検証により page_code は空白も制御文字も含まないため、ログへ出しても
+        # 行を割られる余地は無い。
+        logger.debug("NotePM API のページ詳細を取得します: GET %s", url)
         response = await self._client.get(url, headers=headers)
+        logger.debug("NotePM API から応答を受け取りました: status=%s", response.status_code)
 
         _raise_for_status(
             response,
@@ -512,6 +523,8 @@ async def call_notepm_tool(
         types.CallToolResult: ツールの実行結果。失敗時は is_error=True の結果。
     """
     arguments = params.arguments or {}
+    # ツール名は検証されていない外部由来の値なので、どの水準でも %r で 1 行に収める。
+    logger.info("ツール %r を実行します", params.name)
     try:
         if params.name == "notepm_search":
             search_params = SearchParams(**arguments)
@@ -526,8 +539,6 @@ async def call_notepm_tool(
     except (ValidationError, UnknownToolError) as e:
         # 呼び出しの拒否は想定内。トレースバックは原因の特定に寄与せず、LLM が
         # 組み立てた値が届くたびに ERROR が並ぶと、本当の異常が埋もれる。
-        # ツール名は検証されていない外部由来の値なので、%r で改行ごと落とす。
-        # 生のまま出すと、改行を含む名前で偽のログ行を作られる。
         logger.warning("ツール %r の呼び出しを受け付けませんでした: %s", params.name, e)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
@@ -546,6 +557,7 @@ async def call_notepm_tool(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
 
+    logger.info("ツール %r が %d 文字の結果を返しました", params.name, len(result))
     return types.CallToolResult(content=[TextContent(type="text", text=result)])
 
 
@@ -581,6 +593,7 @@ def create_server(config: NotePMConfig) -> Server[dict[str, Any]]:
         params: types.PaginatedRequestParams | None,
     ) -> types.ListToolsResult:
         """利用可能なツールのリストを返します"""
+        logger.debug("ツールの一覧を返します")
         return types.ListToolsResult(
             tools=[
                 Tool(
@@ -632,6 +645,12 @@ async def serve() -> None:
     config = NotePMConfig()
     server = create_server(config)
 
+    # 起動できたことと接続先を残す。API トークンは出さない。
+    logger.info(
+        "NotePM MCP サーバーを起動します: version=%s", get_server_version() or "不明"
+    )
+    logger.debug("接続先の NotePM API: %s", config.api_base)
+
     # サーバーの初期化オプションを作成
     options = server.create_initialization_options()
     # 標準入出力を使用してサーバーを起動
@@ -642,3 +661,7 @@ async def serve() -> None:
             options,
             raise_exceptions=config.raise_exceptions,
         )
+
+    # 標準入力が閉じられれば server.run() から戻る。クライアントが落としたのか、
+    # サーバーが自ら止まったのかを後から切り分けられるようにしておく。
+    logger.info("NotePM MCP サーバーを終了します")

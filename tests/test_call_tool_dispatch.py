@@ -155,3 +155,34 @@ async def test_unexpected_failure_keeps_the_traceback(
         (logging.ERROR, True)
     ]
 
+
+async def test_successful_call_is_silent_by_default(
+    config: notepm.NotePMConfig, mock_api: InstallMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """既定の水準では、成功した呼び出しは何も出さない。"""
+    mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        await notepm.call_notepm_tool(
+            config,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
+
+    assert [r for r in caplog.records if r.name == notepm.__name__] == []
+
+
+async def test_verbose_records_the_start_and_the_end_of_a_call(
+    config: notepm.NotePMConfig, mock_api: InstallMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """-v 相当の水準まで下げると、呼び出しの開始と完了を追える（Issue #11）。"""
+    mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
+
+    with caplog.at_level(logging.INFO, logger=notepm.__name__):
+        await notepm.call_notepm_tool(
+            config,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
+
+    messages = [r.getMessage() for r in caplog.records if r.name == notepm.__name__]
+    assert len(messages) == 2
+    assert all("notepm_search" in message for message in messages)
