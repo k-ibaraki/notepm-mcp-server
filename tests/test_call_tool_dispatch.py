@@ -2,13 +2,15 @@
 
 ここは serve() の閉包から外へ出した層で、既存のテストが API クライアントを直接
 叩いているため素通しになっていた。ツール名の取り違えや、未知のツール名で例外を
-送出する退行を捕まえる。serve() は raise_exceptions=True で起動しているため、
-この層で例外を送出するとサーバーごと停止する。
+送出する退行を捕まえる。呼び出し側が読める結果として返すのがこの層の責務で、
+例外を投げ返すと、拒否の理由がプロトコルのエラーに潰れて伝わらない。
 """
 
 import json
+import logging
 
 import httpx2
+import pytest
 from mcp import types
 
 from notepm_mcp_server import notepm
@@ -63,3 +65,40 @@ async def test_missing_required_argument_returns_error(
     assert result.is_error is True
     assert "q" in content_text(result)
     assert requests == []
+
+
+async def test_unknown_tool_is_logged_as_a_rejection(
+    config: notepm.NotePMConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """公開していない名前での呼び出しは、拒否として警告に留める。
+
+    サーバーの不具合ではないため、トレースバック付きの ERROR にはしない。
+    """
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        await notepm.call_notepm_tool(
+            config, types.CallToolRequestParams(name="notepm_unknown", arguments={})
+        )
+
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [(r.levelno, r.exc_info is None) for r in records] == [
+        (logging.WARNING, True)
+    ]
+
+
+async def test_tool_name_cannot_forge_a_log_line(
+    config: notepm.NotePMConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ツール名は外部由来なので、改行を含んでいても 1 行に収める。
+
+    生のまま出すと、偽の ERROR 行を差し込んで本物の記録に見せかけられる。
+    """
+    forged = "x\nERROR:notepm_mcp_server.notepm:偽の行です"
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        result = await notepm.call_notepm_tool(
+            config, types.CallToolRequestParams(name=forged, arguments={})
+        )
+
+    assert result.is_error is True
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert "\n" not in records[0].getMessage()

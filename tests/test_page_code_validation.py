@@ -94,8 +94,8 @@ async def test_unsafe_page_code_is_rejected_before_any_request(
 ) -> None:
     """不正な値では HTTP を一切発行せず、エラーとして返る。
 
-    例外ではなく結果として返ることが要点。serve() は raise_exceptions=True で
-    起動しているため、ここで例外を送出するとサーバーごと停止する。
+    例外ではなく結果として返ることが要点。例外にすると、拒否の理由が
+    プロトコルのエラーに潰れて呼び出し側に伝わらない。
     """
     requests = mock_api(lambda request: httpx2.Response(200, json={"page": {}}))
 
