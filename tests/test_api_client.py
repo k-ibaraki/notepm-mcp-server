@@ -1,4 +1,7 @@
-"""NotePMAPIClient の検索・詳細取得の振る舞いを検証する。"""
+"""NotePMAPIClient の検索・詳細取得が、応答をどう組み立てるかを検証する。
+
+成功したときの経路だけを扱う。失敗したときの分類とログは test_api_errors.py にある。
+"""
 
 import json
 
@@ -93,29 +96,6 @@ async def test_search_uses_max_body_length_from_env(
     assert json.loads(result)["pages"][0]["body"] == "あ" * 10 + "..."
 
 
-async def test_search_raises_on_error_status(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(401, text="Unauthorized"))
-
-    with pytest.raises(ValueError) as error:
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.search(notepm.SearchParams(q="議事録"))
-
-    assert "401" in str(error.value)
-    assert "Unauthorized" in str(error.value)
-
-
-async def test_search_raises_on_broken_json(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(200, text="<html>maintenance</html>"))
-
-    with pytest.raises(ValueError, match="Invalid JSON response"):
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.search(notepm.SearchParams(q="議事録"))
-
-
 async def test_detail_requests_page_code_and_keeps_full_body(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:
@@ -131,33 +111,6 @@ async def test_detail_requests_page_code_and_keeps_full_body(
     assert str(requests[0].url) == f"{API_BASE}/abc123"
     # 詳細取得では本文を切り詰めない
     assert json.loads(result)["page"]["body"] == body
-
-
-async def test_detail_raises_on_error_status(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(404, text="Not Found"))
-
-    with pytest.raises(ValueError) as error:
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.get_notepm_page_detail(
-                notepm.NotePMDetailParams(page_code="missing")
-            )
-
-    assert "404" in str(error.value)
-    assert "Not Found" in str(error.value)
-
-
-async def test_detail_raises_on_broken_json(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(200, text="not json"))
-
-    with pytest.raises(ValueError, match="Invalid JSON response"):
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.get_notepm_page_detail(
-                notepm.NotePMDetailParams(page_code="abc123")
-            )
 
 
 async def test_client_is_closed_after_context_exit(

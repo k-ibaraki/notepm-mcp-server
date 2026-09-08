@@ -102,3 +102,56 @@ async def test_tool_name_cannot_forge_a_log_line(
     assert result.is_error is True
     records = [r for r in caplog.records if r.name == notepm.__name__]
     assert "\n" not in records[0].getMessage()
+
+
+async def test_api_failure_is_logged_as_a_warning(
+    config: notepm.NotePMConfig, mock_api: InstallMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """NotePM が返した失敗は、分類済みのメッセージを警告として残すだけにする。
+
+    サーバーの不具合ではないため、トレースバックは付けない。
+    """
+    mock_api(lambda request: httpx2.Response(429, text="Too Many Requests"))
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        result = await notepm.call_notepm_tool(
+            config,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
+
+    assert result.is_error is True
+    # 呼び出し側には、待てば直る種類の失敗だと分かるメッセージが届く
+    assert "リクエスト制限" in content_text(result)
+
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [(r.levelno, r.exc_info is None) for r in records] == [
+        (logging.WARNING, True)
+    ]
+
+
+async def test_unexpected_failure_keeps_the_traceback(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """分類できない失敗だけが、トレースバック付きの ERROR として残る。"""
+    mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
+
+    async def explode(self: notepm.NotePMAPIClient, params: notepm.SearchParams) -> str:
+        raise RuntimeError("想定外の失敗")
+
+    monkeypatch.setattr(notepm.NotePMAPIClient, "search", explode)
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        result = await notepm.call_notepm_tool(
+            config,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
+
+    assert result.is_error is True
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [(r.levelno, r.exc_info is not None) for r in records] == [
+        (logging.ERROR, True)
+    ]
+

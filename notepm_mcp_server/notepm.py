@@ -188,6 +188,150 @@ class NotePMDetailParams(BaseModel):
     ]
 
 
+# 失敗した応答の本文をログへ残すときの上限。原因の手がかりは先頭に出るため全文は要らず、
+# 長い HTML をそのまま流し込まないための歯止めでもある。
+ERROR_BODY_LOG_LIMIT = 200
+
+
+# API 由来の失敗は原因ごとに型を分ける。呼び出し側にとって、待てば直るのか（レート制限・
+# NotePM 側の障害）、設定を直すべきなのか（トークンの不正）、引数が誤っているのか（存在
+# しないページ）で取るべき行動が違うためである。型で分けておくと、call_notepm_tool の
+# ログ水準の出し分けのような判断もここに寄せられる。
+class NotePMError(Exception):
+    """NotePM とのやり取りで検出した失敗の基底"""
+
+
+class NotePMAPIError(NotePMError):
+    """NotePM API が成功以外のステータスを返したときのエラー
+
+    Attributes:
+        status_code (int): API が返した HTTP ステータスコード
+    """
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class NotePMAuthError(NotePMAPIError):
+    """API トークンが不正か、権限が足りないときのエラー"""
+
+
+class NotePMBadRequestError(NotePMAPIError):
+    """リクエストのパラメータを NotePM が受け付けなかったときのエラー"""
+
+
+class NotePMNotFoundError(NotePMAPIError):
+    """要求した対象が存在しないときのエラー"""
+
+
+class NotePMRateLimitError(NotePMAPIError):
+    """リクエスト制限を超えたときのエラー"""
+
+
+class NotePMServerError(NotePMAPIError):
+    """NotePM 側の処理が失敗したときのエラー"""
+
+
+class NotePMResponseError(NotePMError):
+    """応答を JSON として解釈できなかったときのエラー"""
+
+
+def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
+    """失敗した応答の本文を、DEBUG のときだけ先頭部分に限って記録します
+
+    本文には NotePM 側の理由説明が入るため切り分けには役立ちますが、何が含まれるかを
+    こちらでは決められないため、既定の水準では出しません。エラーメッセージにも載せません。
+    載せるとクライアント側の記録へそのまま流れ出てしまうためです。改行で偽のログ行を
+    作られないよう %r で出し、長さも ERROR_BODY_LOG_LIMIT までに抑えます。
+
+    Args:
+        summary (str): 何の応答かを示す短い説明
+        response (httpx2.Response): 失敗した応答
+    """
+    logger.debug("%s: body=%r", summary, response.text[:ERROR_BODY_LOG_LIMIT])
+
+
+def _raise_for_status(response: httpx2.Response, not_found_message: str) -> None:
+    """成功以外のステータスを、原因ごとの例外に振り分けて送出します
+
+    分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
+    400 / 401 / 404 / 429 / 500 に合わせています。403 は記載がありませんが、権限不足を
+    401 と分けて返す実装もあり得るため認証側に寄せています。記載の無いステータスは
+    推測せず、汎用の NotePMAPIError のままにします。
+
+    Args:
+        response (httpx2.Response): API の応答
+        not_found_message (str): 404 のときのメッセージ。404 は「存在しない URL」を
+            表すだけで、何が見つからないのかは呼び出し元しか知らないため受け取ります。
+
+    Raises:
+        NotePMAPIError: ステータスが 200 以外の場合。原因により派生クラスを送出します。
+    """
+    status = response.status_code
+    if status == 200:
+        return
+
+    _log_failed_response_body(
+        f"NotePM API がエラーを返しました (HTTP {status})", response
+    )
+
+    if status in (401, 403):
+        raise NotePMAuthError(
+            f"NotePM API の認証に失敗しました (HTTP {status})。"
+            "NOTEPM_API_TOKEN が正しいか、そのトークンに対象を読む権限があるかを"
+            "確認してください。",
+            status,
+        )
+    if status == 400:
+        raise NotePMBadRequestError(
+            f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
+            "指定したパラメータの値を見直してください。",
+            status,
+        )
+    if status == 404:
+        raise NotePMNotFoundError(not_found_message, status)
+    if status == 429:
+        raise NotePMRateLimitError(
+            f"NotePM API のリクエスト制限に達しました (HTTP {status})。"
+            "制限はユーザーごとに 1 分あたり 60 リクエストです。"
+            "少し時間をおいてから再試行してください。",
+            status,
+        )
+    if 500 <= status < 600:
+        raise NotePMServerError(
+            f"NotePM API の処理が失敗しました (HTTP {status})。"
+            "NotePM 側の一時的な障害の可能性があるため、"
+            "少し時間をおいてから再試行してください。",
+            status,
+        )
+    raise NotePMAPIError(
+        f"NotePM API から想定外の応答が返りました (HTTP {status})。", status
+    )
+
+
+def _load_json_response(response: httpx2.Response) -> Any:
+    """応答の本文を JSON として読み取ります
+
+    Args:
+        response (httpx2.Response): API の応答
+
+    Returns:
+        Any: JSON をデコードした結果
+
+    Raises:
+        NotePMResponseError: JSON として解釈できなかった場合
+    """
+    try:
+        return json.loads(response.text)
+    except json.JSONDecodeError as e:
+        _log_failed_response_body("JSON として解釈できなかった応答", response)
+        raise NotePMResponseError(
+            "NotePM API の応答を JSON として解釈できませんでした。"
+            "NotePM 側がメンテナンス中などで、JSON 以外を返している可能性があります。"
+        ) from e
+
+
 class NotePMAPIClient:
     """NotePM APIクライアント
 
@@ -230,7 +374,8 @@ class NotePMAPIClient:
                 NotePMConfig.max_body_length で切り詰める
 
         Raises:
-            ValueError: APIリクエストが失敗した場合
+            NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
+            NotePMResponseError: 応答をJSONとして解釈できなかった場合
         """
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
         response = await self._client.get(
@@ -239,17 +384,15 @@ class NotePMAPIClient:
             headers=headers,
         )
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
-            )
+        _raise_for_status(
+            response,
+            "NotePM API の検索エンドポイントが見つかりません (HTTP 404)。"
+            "NOTEPM_TEAM の値が正しいかを確認してください。",
+        )
 
-        try:
-            data = json.loads(response.text)
-            # 検索結果の本文を設定された文字数で制限
-            self._truncate_search_bodies(data, self.config.max_body_length)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON response: {e}")
+        data = _load_json_response(response)
+        # 検索結果の本文を設定された文字数で制限
+        self._truncate_search_bodies(data, self.config.max_body_length)
         return json.dumps(data, ensure_ascii=False)
 
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
@@ -268,7 +411,8 @@ class NotePMAPIClient:
             str: 詳細取得結果のJSON文字列。本文は切り詰めない
 
         Raises:
-            ValueError: APIリクエストが失敗した場合
+            NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
+            NotePMResponseError: 応答をJSONとして解釈できなかった場合
         """
         headers = {"Authorization": f"Bearer {self.config.api_token}"}
         # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
@@ -276,17 +420,16 @@ class NotePMAPIClient:
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._client.get(url, headers=headers)
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
-            )
+        _raise_for_status(
+            response,
+            f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
+            "notepm_search の検索結果に含まれる page_code を渡しているか、"
+            "そのページが削除されていないかを確認してください。",
+        )
 
-        try:
-            data = json.loads(response.text)
-            # 本文は切り詰めない（理由は docstring の「応答サイズの方針」を参照）
-            return json.dumps(data, ensure_ascii=False)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON response: {e}")
+        data = _load_json_response(response)
+        # 本文は切り詰めない（理由は docstring の「応答サイズの方針」を参照）
+        return json.dumps(data, ensure_ascii=False)
 
     def _truncate_search_bodies(self, data: Any, max_length: int) -> None:
         """検索結果の各ページの本文を指定された文字数で省略します
@@ -354,9 +497,12 @@ async def call_notepm_tool(
     異常は例外を送出せず、必ず is_error=True の結果として返します。ツールの失敗は
     クライアントが読める応答であるべきで、JSON-RPC のエラーにする必要がないためです。
 
-    ログの水準は原因で分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
-    未知のツール名）は防御が働いた結果でサーバーの不具合ではないため、警告として
-    値だけを残します。それ以外は想定外の失敗なので、トレースバック付きで記録します。
+    ログの水準は原因で三段に分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
+    未知のツール名）は防御が働いた結果なので、警告として値だけを残します。NotePM API
+    由来の失敗（認証・存在しないページ・レート制限など）も、原因は分類済みのメッセージが
+    持っているため警告に留めます。どちらもサーバーの不具合ではなく、トレースバックが
+    原因の特定に寄与しないためです。それ以外は想定外の失敗なので、トレースバック付きで
+    記録します。
 
     Args:
         config (NotePMConfig): API設定
@@ -383,6 +529,14 @@ async def call_notepm_tool(
         # ツール名は検証されていない外部由来の値なので、%r で改行ごと落とす。
         # 生のまま出すと、改行を含む名前で偽のログ行を作られる。
         logger.warning("ツール %r の呼び出しを受け付けませんでした: %s", params.name, e)
+        return types.CallToolResult(
+            content=[TextContent(type="text", text=str(e))], is_error=True
+        )
+    except NotePMError as e:
+        # NotePM が返した失敗。分類済みのメッセージがそのまま原因を示すため、
+        # トレースバックは付けない。応答本文は _log_failed_response_body が
+        # DEBUG のときだけ残す。
+        logger.warning("ツール %r の実行が失敗しました: %s", params.name, e)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )

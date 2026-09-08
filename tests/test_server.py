@@ -46,7 +46,7 @@ async def test_tool_failure_keeps_the_connection_alive(
 
     mock_api(handler)
 
-    with caplog.at_level(logging.ERROR, logger=notepm.__name__):
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
         async with Client(notepm.create_server(config)) as client:
             failed = await client.call_tool("notepm_search", {"q": "失敗"})
             succeeded = await client.call_tool("notepm_search", {"q": "成功"})
@@ -54,10 +54,11 @@ async def test_tool_failure_keeps_the_connection_alive(
     assert failed.is_error is True
     assert succeeded.is_error is False
 
-    # 想定外の失敗は握りつぶさず、トレースバックを残す（原因を追える）
+    # 握りつぶさず記録は残す。NotePM 側の失敗なのでトレースバックは付けない
+    # （水準の出し分けは tests/test_call_tool_dispatch.py で押さえている）
     records = [r for r in caplog.records if r.name == notepm.__name__]
-    assert [(r.levelno, r.exc_info is not None) for r in records] == [
-        (logging.ERROR, True)
+    assert [(r.levelno, r.exc_info is None) for r in records] == [
+        (logging.WARNING, True)
     ]
 
 
