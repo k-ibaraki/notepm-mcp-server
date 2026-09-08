@@ -8,14 +8,14 @@ from typing import Any
 
 import httpx2
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from notepm_mcp_server import notepm
 
 from .conftest import InstallMock
 
 
-def properties(model: type[notepm.BaseModel]) -> dict[str, Any]:
+def properties(model: type[BaseModel]) -> dict[str, Any]:
     return model.model_json_schema()["properties"]
 
 
@@ -24,7 +24,7 @@ def properties(model: type[notepm.BaseModel]) -> dict[str, Any]:
     [notepm.SearchParams, notepm.NotePMDetailParams],
     ids=["SearchParams", "NotePMDetailParams"],
 )
-def test_every_field_has_a_description(model: type[notepm.BaseModel]) -> None:
+def test_every_field_has_a_description(model: type[BaseModel]) -> None:
     """説明の無いフィールドがあると、ツールを呼ぶ側が値の意味を判断できない。"""
     missing = [
         name
@@ -85,6 +85,10 @@ def test_date_filters_expose_their_format(name: str) -> None:
         pytest.param(
             {"q": "議事録", "updated_at_to": "2020-08-01T10:10:10+09:00"},
             id="日付が日時形式",
+        ),
+        # 正規表現に \d を使うと Unicode の数字全体に一致し、ここが通ってしまう
+        pytest.param(
+            {"q": "議事録", "created_at_to": "２０２０-０８-０１"}, id="日付が全角数字"
         ),
     ],
 )
