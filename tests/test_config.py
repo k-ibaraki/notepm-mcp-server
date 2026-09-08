@@ -45,12 +45,43 @@ def test_max_body_length_defaults_to_200(monkeypatch: pytest.MonkeyPatch) -> Non
     assert notepm.NotePMConfig().max_body_length == 200
 
 
-def test_max_body_length_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("50", 50, id="正の整数"),
+        pytest.param(" 50 ", 50, id="前後に空白の整数"),
+        pytest.param("0", 0, id="0は本文を丸ごと省略する指定"),
+        pytest.param("", 200, id="空文字は未設定と同じ"),
+    ],
+)
+def test_max_body_length_reads_env(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: int
+) -> None:
     monkeypatch.setenv("NOTEPM_TEAM", TEAM)
     monkeypatch.setenv("NOTEPM_API_TOKEN", API_TOKEN)
-    monkeypatch.setenv("NOTEPM_MAX_BODY_LENGTH", "50")
+    monkeypatch.setenv("NOTEPM_MAX_BODY_LENGTH", value)
 
-    assert notepm.NotePMConfig().max_body_length == 50
+    assert notepm.NotePMConfig().max_body_length == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("abc", id="整数として読めない"),
+        pytest.param("1.5", id="小数"),
+        pytest.param("-1", id="負の値"),
+    ],
+)
+def test_max_body_length_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """不正な値は起動時に落とす。どの環境変数の話かをメッセージから読み取れること。"""
+    monkeypatch.setenv("NOTEPM_TEAM", TEAM)
+    monkeypatch.setenv("NOTEPM_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("NOTEPM_MAX_BODY_LENGTH", value)
+
+    with pytest.raises(ValueError, match="NOTEPM_MAX_BODY_LENGTH"):
+        notepm.NotePMConfig()
 
 
 def test_raise_exceptions_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
