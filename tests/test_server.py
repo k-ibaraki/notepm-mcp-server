@@ -73,7 +73,7 @@ async def test_unexpected_exception_does_not_stop_the_server(
     calls: list[str] = []
 
     async def explode(
-        config: notepm.NotePMConfig, params: object
+        client: notepm.NotePMAPIClient, params: object
     ) -> types.CallToolResult:
         calls.append("call")
         raise RuntimeError("想定外の失敗")

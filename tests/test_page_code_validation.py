@@ -99,12 +99,13 @@ async def test_unsafe_page_code_is_rejected_before_any_request(
     """
     requests = mock_api(lambda request: httpx2.Response(200, json={"page": {}}))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(
-            name="notepm_page_detail", arguments={"page_code": page_code}
-        ),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(
+                name="notepm_page_detail", arguments={"page_code": page_code}
+            ),
+        )
 
     assert result.is_error is True
     # NotePM へは一度も出て行かない
@@ -120,12 +121,13 @@ async def test_valid_page_code_still_reaches_the_detail_endpoint(
     payload = {"page": {"page_code": "abc123", "title": "設計メモ", "body": "本文"}}
     requests = mock_api(lambda request: httpx2.Response(200, json=payload))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(
-            name="notepm_page_detail", arguments={"page_code": "abc123"}
-        ),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(
+                name="notepm_page_detail", arguments={"page_code": "abc123"}
+            ),
+        )
 
     assert result.is_error is False
     # エラーでないことだけでなく、応答がそのまま返っていることまで確かめる
@@ -244,12 +246,13 @@ async def test_rejection_is_logged_as_a_warning_without_a_traceback(
     本当の異常が埋もれる。値だけを警告として残す。
     """
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        result = await notepm.call_notepm_tool(
-            config,
-            types.CallToolRequestParams(
-                name="notepm_page_detail", arguments={"page_code": "../notes"}
-            ),
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_page_detail", arguments={"page_code": "../notes"}
+                ),
+            )
 
     assert result.is_error is True
     records = [r for r in caplog.records if r.name == notepm.__name__]

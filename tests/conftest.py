@@ -46,17 +46,34 @@ def clear_notepm_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def forbid_real_http(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mock_api を使わずに HTTP クライアントを生成したら失敗させる。
+    """mock_api を使わずに送られた HTTP リクエストを失敗させる。
 
     モックの差し替えを書き忘れたテストが、実際の NotePM API へ出ていくのを防ぐ。
+    禁じるのは送信だけで、生成は通す。サーバーの lifespan が起動のたびに
+    クライアントを作るため、生成を禁じると HTTP を使わないテストまで落ちる。
     """
 
-    def guard(**kwargs: Any) -> httpx2.AsyncClient:
+    def refuse(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError(
             "実 API へ接続しようとしました。mock_api フィクスチャで応答を差し替えてください。"
         )
 
+    def guard(**kwargs: Any) -> httpx2.AsyncClient:
+        kwargs["transport"] = httpx2.MockTransport(refuse)
+        return _REAL_ASYNC_CLIENT(**kwargs)
+
     monkeypatch.setattr(notepm.httpx2, "AsyncClient", guard)
+
+
+@pytest.fixture(autouse=True)
+def no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """再試行の待ち時間を 0 にして、テストが実時間を待たないようにする。
+
+    待ち時間の決め方そのものは _retry_delay() の単体テストで固定する
+    （tests/test_retry_policy.py）。
+    """
+    monkeypatch.setattr(notepm, "RETRY_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(notepm, "MAX_RETRY_WAIT_SECONDS", 0.0)
 
 
 @pytest.fixture
