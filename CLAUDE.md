@@ -33,11 +33,14 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 ## 実装上の要点
 
 - MCP の低レベルサーバは `mcp` 2.x の注入方式（`Server(on_list_tools=..., on_call_tool=...)`）で使います。1.x のデコレータ方式（`@server.list_tools`）は廃止済みで、移行時に書き換えた経緯があります
-- `server.run(..., raise_exceptions=True)` で起動しているため、**ツールハンドラ内で例外を送出するとプロセスごと停止します**。異常は必ず `CallToolResult(is_error=True)` で返してください。ツール実行の本体は `call_notepm_tool()` にあり、`on_call_tool` はそこへ委譲するだけです
+- `server.run()` の `raise_exceptions` は既定で無効です。ハンドラを抜けた例外は SDK 側でエラー応答に変換され、トレースバックが stderr のログに残ります。`NOTEPM_RAISE_EXCEPTIONS=1` を渡したときだけ再送出され、その場合は **例外がプロセスごとサーバーを停止させます**。デバッグ専用の切り替えで、常駐運用では有効にしません
+- ツールの異常は `CallToolResult(is_error=True)` で返します。ツール実行の本体は `call_notepm_tool()` にあり、そこで例外を捕捉してこの形に変換します。`on_call_tool` は委譲するだけです。この捕捉があるため、ツール実行中の例外は `NOTEPM_RAISE_EXCEPTIONS` の設定に関わらず再送出されません
+- 捕捉した例外のログは原因で水準を分けます。呼び出しを拒否した場合（`PAGE_CODE_PATTERN` などの検証、`UnknownToolError`）は `logger.warning()` で値だけを残し、それ以外は `logger.exception()` でトレースバックまで残します。拒否は防御が働いた結果なので、本当の異常と同じ水準にはしません
+- サーバーの組み立ては `create_server(config)` にあり、stdio への接続を含みません。テストは `mcp.client.Client` に渡して in-process で叩いています（`tests/test_server.py`）
 - ツールの入力スキーマは pydantic モデル（`SearchParams` / `NotePMDetailParams`）の `model_json_schema()` をそのまま公開しています。パラメータを増減するときはモデル側を直します
 - `page_code` は詳細取得 URL のパス要素へ直接埋め込むため、`PAGE_CODE_PATTERN` でパスの構造を変え得る文字（空白・制御文字と `/` `\` `.` `?` `#` `%` `:`）を拒みます。ここを緩めると、httpx2 の URL 正規化を介してページ詳細以外のエンドポイントへ到達できるようになります
 - 検索応答は `_truncate_body_content()` で本文を切り詰めます（既定 200 文字、`NOTEPM_MAX_BODY_LENGTH` で変更可）。詳細取得は切り詰めません
-- `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します
+- `NotePMConfig` が環境変数を読み、`NOTEPM_TEAM` か `NOTEPM_API_TOKEN` が欠けていれば起動時に `ValueError` を送出します。設定ミスは起動時に気付けるべきなので、この失敗はそのまま落とします
 - `notepm` モジュールは import 時に `load_dotenv()` を呼びます
 
 ## 依存関係の方針
