@@ -10,12 +10,11 @@ import json
 import httpx2
 import pytest
 from mcp import types
-from mcp.types import TextContent
 from pydantic import ValidationError
 
 from notepm_mcp_server import notepm
 
-from .conftest import API_BASE, InstallMock
+from .conftest import API_BASE, InstallMock, content_text
 
 # 検証が無ければリクエスト先を変えられてしまう値。
 # 前半は Issue で実測された値、後半は同じ狙いの変種。
@@ -46,13 +45,6 @@ SAFE_PAGE_CODES = ["abc123", "ABCdef", "a-b_c", "9", "日本語コード", "a~b"
 DENIED_ASCII_SYMBOLS = set(" /\\.?#%:")
 
 
-def content_text(result: types.CallToolResult) -> str:
-    """CallToolResult の先頭ブロックからテキストを取り出す。"""
-    block = result.content[0]
-    assert isinstance(block, TextContent)
-    return block.text
-
-
 @pytest.mark.parametrize("page_code", UNSAFE_PAGE_CODES)
 def test_rejects_page_codes_that_change_the_request_target(page_code: str) -> None:
     with pytest.raises(ValidationError):
@@ -68,7 +60,11 @@ def test_accepts_ordinary_page_codes(page_code: str) -> None:
 async def test_unsafe_page_code_is_rejected_before_any_request(
     config: notepm.NotePMConfig, mock_api: InstallMock, page_code: str
 ) -> None:
-    """不正な値では HTTP を一切発行せず、エラーとして返る。"""
+    """不正な値では HTTP を一切発行せず、エラーとして返る。
+
+    例外ではなく結果として返ることが要点。serve() は raise_exceptions=True で
+    起動しているため、ここで例外を送出するとサーバーごと停止する。
+    """
     requests = mock_api(lambda request: httpx2.Response(200, json={"page": {}}))
 
     result = await notepm.call_notepm_tool(
@@ -83,26 +79,6 @@ async def test_unsafe_page_code_is_rejected_before_any_request(
     assert requests == []
     # 呼び出し側が原因を特定できるよう、項目名と与えた値が示される
     assert "page_code" in content_text(result)
-
-
-async def test_error_is_returned_not_raised(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    """例外送出はサーバーごと停止させるため、結果として返ることを固定する。
-
-    serve() は raise_exceptions=True で起動している。
-    """
-    mock_api(lambda request: httpx2.Response(200, json={"page": {}}))
-
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(
-            name="notepm_page_detail", arguments={"page_code": "../notes"}
-        ),
-    )
-
-    assert isinstance(result, types.CallToolResult)
-    assert result.is_error is True
 
 
 async def test_valid_page_code_still_reaches_the_detail_endpoint(
@@ -154,15 +130,15 @@ def test_page_code_constraint_is_published_in_the_tool_schema() -> None:
 
 
 def test_character_class_matches_the_intended_deny_set() -> None:
-    """文字クラスに意図しない範囲指定が紛れていないことを ASCII 全域で確認する。
+    """文字クラスに意図しない範囲指定が紛れていないことを 1 文字ずつ確認する。
 
-    拒否リスト方式では、範囲指定の書き損じがそのまま穴になる。1 文字ずつ判定を
-    突き合わせ、拒むべき文字と受け入れるべき文字の境界を固定する。
+    拒否リスト方式では、範囲指定の書き損じがそのまま穴になる。ASCII 全域に加え、
+    C1 制御文字（U+0080-U+009F）まで判定を突き合わせ、境界を固定する。
     """
     mismatched: list[str] = []
-    for code_point in range(0x80):
+    for code_point in range(0xA0):
         char = chr(code_point)
-        is_control = code_point <= 0x1F or code_point == 0x7F
+        is_control = code_point <= 0x1F or 0x7F <= code_point <= 0x9F
         should_accept = not is_control and char not in DENIED_ASCII_SYMBOLS
 
         try:
