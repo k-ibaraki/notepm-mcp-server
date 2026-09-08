@@ -308,6 +308,41 @@ def get_server_version() -> str:
         return ""
 
 
+async def call_notepm_tool(
+    config: NotePMConfig, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    """ツール呼び出しを実行し、結果を CallToolResult として返します
+
+    server.run(..., raise_exceptions=True) で起動しているため、ここで例外を送出すると
+    サーバー自体が停止します。異常は必ず is_error=True の結果として返してください。
+
+    Args:
+        config (NotePMConfig): API設定
+        params (types.CallToolRequestParams): ツール名と引数
+
+    Returns:
+        types.CallToolResult: ツールの実行結果。失敗時は is_error=True の結果。
+    """
+    arguments = params.arguments or {}
+    try:
+        if params.name == "notepm_search":
+            search_params = SearchParams(**arguments)
+            async with NotePMAPIClient(config) as client:
+                result = await client.search(search_params)
+        elif params.name == "notepm_page_detail":
+            detail_params = NotePMDetailParams(**arguments)
+            async with NotePMAPIClient(config) as client:
+                result = await client.get_notepm_page_detail(detail_params)
+        else:
+            raise ValueError(f"不明なツールです: {params.name}")
+    except Exception as e:
+        return types.CallToolResult(
+            content=[TextContent(type="text", text=str(e))], is_error=True
+        )
+
+    return types.CallToolResult(content=[TextContent(type="text", text=result)])
+
+
 async def serve() -> None:
     """MCPサーバーのメインエントリーポイント
 
@@ -362,27 +397,9 @@ async def serve() -> None:
             params (types.CallToolRequestParams): ツール名と引数
 
         Returns:
-            types.CallToolResult: ツールの実行結果。失敗時は is_error=True の
-                結果を返す（例外を送出するとサーバー自体が停止するため）。
+            types.CallToolResult: ツールの実行結果
         """
-        arguments = params.arguments or {}
-        try:
-            if params.name == "notepm_search":
-                search_params = SearchParams(**arguments)
-                async with NotePMAPIClient(config) as client:
-                    result = await client.search(search_params)
-            elif params.name == "notepm_page_detail":
-                detail_params = NotePMDetailParams(**arguments)
-                async with NotePMAPIClient(config) as client:
-                    result = await client.get_notepm_page_detail(detail_params)
-            else:
-                raise ValueError(f"不明なツールです: {params.name}")
-        except Exception as e:
-            return types.CallToolResult(
-                content=[TextContent(type="text", text=str(e))], is_error=True
-            )
-
-        return types.CallToolResult(content=[TextContent(type="text", text=result)])
+        return await call_notepm_tool(config, params)
 
     server: Server[dict[str, Any]] = Server(
         "notepm-mcp",
