@@ -266,6 +266,34 @@ async def test_total_timeout_also_bounds_the_retry_waits(
     assert len(requests) == 1
 
 
+async def test_client_survives_a_total_timeout(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """打ち切った後も、同じクライアントで次の呼び出しができる。
+
+    クライアントはサーバーの生存期間を通じて使い回すので、一度の打ち切りが
+    以降の呼び出しまで巻き込んではならない。
+    """
+    monkeypatch.setattr(notepm, "TOTAL_TIMEOUT_SECONDS", 0.05)
+
+    async def slow_then_fast(request: httpx2.Request) -> httpx2.Response:
+        if request.url.params.get("q") == "遅い":
+            await asyncio.sleep(30)
+        return httpx2.Response(200, json={"pages": []})
+
+    mock_api(slow_then_fast)
+
+    async with notepm.NotePMAPIClient(config) as client:
+        with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+            await client.search(notepm.SearchParams(q="遅い"))
+
+        result = await client.search(notepm.SearchParams(q="速い"))
+
+    assert json.loads(result) == {"pages": []}
+
+
 async def test_search_retries_a_broken_connection(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:
