@@ -289,6 +289,9 @@ async def test_client_survives_a_total_timeout(
         with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
             await client.search(notepm.SearchParams(q="遅い"))
 
+        # 二度目は本来の上限で送る。詰めた上限のままだと、遅い環境で
+        # 「使えなくなった」のか「間に合わなかった」のか区別が付かない。
+        monkeypatch.setattr(notepm, "TOTAL_TIMEOUT_SECONDS", 60.0)
         result = await client.search(notepm.SearchParams(q="速い"))
 
     assert json.loads(result) == {"pages": []}
@@ -316,6 +319,28 @@ async def test_search_retries_a_broken_connection(
 
     assert json.loads(result) == {"pages": []}
     assert len(requests) == 2
+
+
+async def test_read_timeout_is_not_retried(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """応答を返さない相手を待つ時間が、試行回数の分だけ積み上がらないようにする。
+
+    接続系のエラーと違い、読み取りのタイムアウトは 1 回あたりの待ちが長い。
+    再試行の対象に含めると、全体の上限をすぐ食い潰す。
+    """
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("timed out", request=request)
+
+    requests = mock_api(handler)
+
+    # 全体の打ち切りに化けさせず、原因が分かる形のまま返す
+    with pytest.raises(httpx2.ReadTimeout):
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    assert len(requests) == 1
 
 
 async def test_detail_retries_transient_failure(
