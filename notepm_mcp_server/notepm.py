@@ -371,8 +371,10 @@ class NotePMAPIClient:
                 response = await self._client.get(url, params=params)
             except RETRYABLE_TRANSPORT_ERRORS as e:
                 delay = _retry_delay(attempt, None)
+                # 例外の文言にはサーバー由来の受信データが混ざり得る。ツール名と
+                # 同じく %r で改行ごと落とし、偽のログ行を作られないようにする。
                 logger.warning(
-                    "NotePM API への接続に失敗しました（%d 回目、%.1f 秒後に再試行）: %s",
+                    "NotePM API への接続に失敗しました（%d 回目、%.1f 秒後に再試行）: %r",
                     attempt,
                     delay,
                     e,
