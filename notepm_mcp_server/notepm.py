@@ -212,6 +212,12 @@ class SearchParams(BaseModel):
 # 公開スキーマ(ECMA-262)のほうが厳しい向きになるため、そのままにしている。
 PAGE_CODE_PATTERN = r"^[^\s/\\.?#%:\x00-\x1f\x7f\x80-\x9f]+$"
 
+# page_code の長さの上限。NotePM のページコードは 10 文字だが、桁数が変わっても困らない
+# よう余裕を取る。上限が要るのは、失敗した page_code をエラーメッセージへ載せるように
+# したためである（get_notepm_page_detail を参照）。長さを縛らないと、誤った値が届くたび
+# にその全長が呼び出し側の文脈とログへ流れる。
+PAGE_CODE_MAX_LENGTH = 128
+
 
 # SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
 # description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
@@ -222,10 +228,12 @@ class NotePMDetailParams(BaseModel):
         str,
         Field(
             pattern=PAGE_CODE_PATTERN,
+            max_length=PAGE_CODE_MAX_LENGTH,
             description=(
                 "取得するページのページコード（例: aaaaad0001）。"
                 "notepm_search の検索結果に含まれる page_code をそのまま渡す。"
                 "空白・制御文字と / \\ . ? # % : は使えない。"
+                f"長さは {PAGE_CODE_MAX_LENGTH} 文字まで。"
             ),
         ),
     ]
@@ -350,7 +358,12 @@ class NotePMAuthError(NotePMAPIError):
 
 
 class NotePMBadRequestError(NotePMAPIError):
-    """リクエストのパラメータを NotePM が受け付けなかったときのエラー"""
+    """NotePM がリクエストを受け付けなかったときのエラー
+
+    パラメータの誤りだけでなく、詳細取得で対象のページに辿り着けない場合もここに
+    入ります。実 API が存在しない page_code に 404 ではなく 400 を返すためです
+    （Issue #31）。
+    """
 
 
 class NotePMNotFoundError(NotePMAPIError):
@@ -388,7 +401,12 @@ def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
     logger.debug("%s: body=%r", summary, response.text[:ERROR_BODY_LOG_LIMIT])
 
 
-def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> None:
+def _raise_for_status(
+    response: httpx2.Response,
+    *,
+    not_found_message: str,
+    bad_request_message: str | None = None,
+) -> None:
     """成功以外のステータスを、原因ごとの例外に振り分けて送出します
 
     分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
@@ -400,6 +418,9 @@ def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> N
         response (httpx2.Response): API の応答
         not_found_message (str): 404 のときのメッセージ。404 は「存在しない URL」を
             表すだけで、何が見つからないのかは呼び出し元しか知らないため受け取ります。
+        bad_request_message (str | None): 400 のときのメッセージ。省略すると、どの
+            パラメータとも結び付かない一般的な文言を使います。渡す場合は、呼び出し元が
+            ステータスまで含めた文面を組み立ててください。
 
     Raises:
         NotePMAPIError: ステータスが 200 以外の場合。原因により派生クラスを送出します。
@@ -421,16 +442,22 @@ def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> N
         )
     if status == 400:
         raise NotePMBadRequestError(
-            f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
-            "指定したパラメータの値を見直してください。",
+            bad_request_message
+            or (
+                f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
+                "指定したパラメータの値を見直してください。"
+            ),
             status,
         )
     if status == 404:
         raise NotePMNotFoundError(not_found_message, status)
     if status == 429:
+        # 具体的な上限値は載せない。NotePM の API ドキュメントは「ユーザ毎に1分間に60
+        # リクエスト」とするが、実応答の X-RateLimit-Limit ヘッダは 120 を返す。どちらが
+        # 実際の上限かこちらでは確かめられないので、確かめられない数字を呼び出し側へ
+        # 渡さない（Issue #32）。待てば直る失敗であることだけを伝えれば足りる。
         raise NotePMRateLimitError(
             f"NotePM API のリクエスト制限に達しました (HTTP {status})。"
-            "制限はユーザーごとに 1 分あたり 60 リクエストです。"
             "少し時間をおいてから再試行してください。",
             status,
         )
@@ -656,12 +683,25 @@ class NotePMAPIClient:
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._get(url)
 
+        # 400 にも文面を渡すのは、実 API が存在しない page_code に対して 404 ではなく
+        # 400 (本文は {"messages":["権限がありません"]}) を返すためである（Issue #31）。
+        # 一般的な「パラメータを見直してください」だけでは、どのページで失敗したのかも、
+        # 存在しないのか権限が無いのかも呼び出し側に伝わらない。NotePM 側が両者を
+        # 区別しないので、こちらも断定せず両方の可能性を挙げる。404 の分岐は残す。
+        # 実 API で 404 が返らないと確かめたわけではないためである。
         _raise_for_status(
             response,
             not_found_message=(
                 f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
-                "notepm_search の検索結果に含まれる page_code を渡しているか、"
-                "そのページが削除されていないかを確認してください。"
+                "notepm_search の検索結果に含まれる page_code を渡しているかを"
+                "確認してください。"
+            ),
+            bad_request_message=(
+                f"指定されたページを取得できません (HTTP 400): page_code={params.page_code}。"
+                "そのページが存在しないか、NOTEPM_API_TOKEN のトークンに"
+                "そのページを読む権限が無い可能性があります。"
+                "notepm_search の検索結果に含まれる page_code を渡しているかを"
+                "確認してください。"
             ),
         )
 

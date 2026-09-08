@@ -6,6 +6,7 @@
 
 import json
 import logging
+import re
 
 import httpx2
 import pytest
@@ -17,7 +18,7 @@ from .conftest import API_TOKEN, InstallMock
 # NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げるステータスと、こちらの
 # 分類の対応。403 は記載が無いが、権限不足として返り得るため認証側に寄せている。
 STATUS_CASES = [
-    pytest.param(400, notepm.NotePMBadRequestError, id="400はパラメータの誤り"),
+    pytest.param(400, notepm.NotePMBadRequestError, id="400はリクエストを受け付けない"),
     pytest.param(401, notepm.NotePMAuthError, id="401は認証"),
     pytest.param(403, notepm.NotePMAuthError, id="403も認証に寄せる"),
     pytest.param(404, notepm.NotePMNotFoundError, id="404は対象が無い"),
@@ -78,6 +79,71 @@ async def test_detail_not_found_names_the_page_code(
             )
 
     assert "missing0001" in str(error.value)
+
+
+async def test_detail_bad_request_names_the_page_code(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """詳細取得の 400 も、どのページコードで失敗したのかを伝える。
+
+    実 API は存在しない page_code に 404 ではなく 400 を返す（Issue #31）。ここが
+    一般的な文言のままだと、呼び出し側は次に何を試せばよいのか読み取れない。
+    """
+    # 本文は実 API が返す形に寄せつつ、中身は組み立てた文面と重ならない目印にする。
+    # 実本文の「権限がありません」をそのまま使うと、下の assert が「意図した文面が
+    # 返っている」のか「応答本文が漏れた」のかを区別できなくなる。
+    mock_api(lambda request: httpx2.Response(400, text='{"messages":["MARKER"]}'))
+
+    with pytest.raises(notepm.NotePMBadRequestError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.get_notepm_page_detail(
+                notepm.NotePMDetailParams(page_code="missing0001")
+            )
+
+    message = str(error.value)
+    assert "missing0001" in message
+    # NotePM が存在しないページと権限不足を区別しないため、こちらも断定しない。
+    assert "存在しない" in message
+    assert "権限" in message
+    # 呼び出し元が文面を差し込めるようになった経路でも、応答本文は混ざらない。
+    assert "MARKER" not in message
+
+
+async def test_search_bad_request_stays_generic(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """検索の 400 は一般的な文言のまま。page_code のような手掛かりを持たないため。"""
+    mock_api(lambda request: httpx2.Response(400, text="エラーの詳細"))
+
+    with pytest.raises(notepm.NotePMBadRequestError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    message = str(error.value)
+    assert "指定したパラメータの値を見直してください" in message
+    assert "エラーの詳細" not in message
+
+
+async def test_rate_limit_message_claims_no_specific_limit(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """429 の文言に具体的な上限値は載せない。
+
+    NotePM の API ドキュメントは 1 分あたり 60 リクエストとするが、実応答の
+    X-RateLimit-Limit ヘッダは 120 を返す。どちらが実際の上限かこちらでは確かめ
+    られないため、確かめられない数字を呼び出し側へ渡さない（Issue #32）。
+    """
+    mock_api(lambda request: httpx2.Response(429, text="Too Many Requests"))
+
+    with pytest.raises(notepm.NotePMRateLimitError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    message = str(error.value)
+    # 60 と 120 だけを弾いても、別の数字に書き換わったときに素通りする。守りたいのは
+    # 「数量の案内を載せない」ことなので、数量表現そのものが無いことを見る。
+    assert re.search(r"[0-9]+\s*リクエスト", message) is None
+    assert "再試行" in message
 
 
 async def test_unclassified_status_stays_generic(
