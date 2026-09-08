@@ -6,6 +6,7 @@
 例外を投げ返すと、拒否の理由がプロトコルのエラーに潰れて伝わらない。
 """
 
+import asyncio
 import json
 import logging
 
@@ -24,10 +25,11 @@ async def test_search_tool_reaches_the_search_endpoint(
     payload = {"pages": [{"title": "議事録", "body": "本文"}]}
     requests = mock_api(lambda request: httpx2.Response(200, json=payload))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
 
     assert result.is_error is False
     assert json.loads(content_text(result)) == payload
@@ -41,10 +43,11 @@ async def test_unknown_tool_returns_error_instead_of_raising(
 ) -> None:
     requests = mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(name="notepm_unknown", arguments={}),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(name="notepm_unknown", arguments={}),
+        )
 
     assert result.is_error is True
     # どのツール名が届いたのかを呼び出し側が判別できる
@@ -58,9 +61,10 @@ async def test_missing_required_argument_returns_error(
     """引数不足も例外にせず、HTTP を発行せずにエラーとして返す。"""
     requests = mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
-    result = await notepm.call_notepm_tool(
-        config, types.CallToolRequestParams(name="notepm_search", arguments=None)
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client, types.CallToolRequestParams(name="notepm_search", arguments=None)
+        )
 
     assert result.is_error is True
     assert "q" in content_text(result)
@@ -75,9 +79,10 @@ async def test_unknown_tool_is_logged_as_a_rejection(
     サーバーの不具合ではないため、トレースバック付きの ERROR にはしない。
     """
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        await notepm.call_notepm_tool(
-            config, types.CallToolRequestParams(name="notepm_unknown", arguments={})
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            await notepm.call_notepm_tool(
+                client, types.CallToolRequestParams(name="notepm_unknown", arguments={})
+            )
 
     records = [r for r in caplog.records if r.name == notepm.__name__]
     assert [(r.levelno, r.exc_info is None) for r in records] == [
@@ -95,9 +100,10 @@ async def test_tool_name_cannot_forge_a_log_line(
     forged = "x\nERROR:notepm_mcp_server.notepm:偽の行です"
 
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        result = await notepm.call_notepm_tool(
-            config, types.CallToolRequestParams(name=forged, arguments={})
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client, types.CallToolRequestParams(name=forged, arguments={})
+            )
 
     assert result.is_error is True
     records = [r for r in caplog.records if r.name == notepm.__name__]
@@ -114,19 +120,24 @@ async def test_api_failure_is_logged_as_a_warning(
     mock_api(lambda request: httpx2.Response(429, text="Too Many Requests"))
 
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        result = await notepm.call_notepm_tool(
-            config,
-            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
 
     assert result.is_error is True
     # 呼び出し側には、待てば直る種類の失敗だと分かるメッセージが届く
     assert "リクエスト制限" in content_text(result)
 
+    # 429 は再試行の対象なので、その警告に続いて分類済みの失敗が最後に残る。
+    # いずれもサーバーの不具合ではないため、トレースバックは付けない。
     records = [r for r in caplog.records if r.name == notepm.__name__]
-    assert [(r.levelno, r.exc_info is None) for r in records] == [
-        (logging.WARNING, True)
-    ]
+    assert [r.levelno for r in records] == [logging.WARNING] * len(records)
+    assert all(r.exc_info is None for r in records)
+    assert "リクエスト制限" in records[-1].getMessage()
 
 
 async def test_unexpected_failure_keeps_the_traceback(
@@ -144,10 +155,13 @@ async def test_unexpected_failure_keeps_the_traceback(
     monkeypatch.setattr(notepm.NotePMAPIClient, "search", explode)
 
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        result = await notepm.call_notepm_tool(
-            config,
-            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
 
     assert result.is_error is True
     records = [r for r in caplog.records if r.name == notepm.__name__]
@@ -163,10 +177,13 @@ async def test_successful_call_is_silent_by_default(
     mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        await notepm.call_notepm_tool(
-            config,
-            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
 
     assert [r for r in caplog.records if r.name == notepm.__name__] == []
 
@@ -178,11 +195,50 @@ async def test_verbose_records_the_start_and_the_end_of_a_call(
     mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
     with caplog.at_level(logging.INFO, logger=notepm.__name__):
-        await notepm.call_notepm_tool(
-            config,
-            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
 
     messages = [r.getMessage() for r in caplog.records if r.name == notepm.__name__]
     assert len(messages) == 2
     assert all("notepm_search" in message for message in messages)
+
+
+async def test_timeout_is_logged_as_a_warning(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """上限で打ち切った場合も、分類済みの失敗として警告に留める。
+
+    待っても返ってこなかっただけで、サーバーの不具合ではない。
+    """
+    monkeypatch.setattr(notepm, "TOTAL_TIMEOUT_SECONDS", 0.05)
+
+    async def never_answers(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(30)
+        return httpx2.Response(200, json={"pages": []})
+
+    mock_api(never_answers)
+
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client,
+                types.CallToolRequestParams(
+                    name="notepm_search", arguments={"q": "議事録"}
+                ),
+            )
+
+    assert result.is_error is True
+    # 呼び出し側には、待てば直り得る失敗だと分かるメッセージが届く
+    assert "秒以内に結果を得られませんでした" in content_text(result)
+
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [r.levelno for r in records] == [logging.WARNING] * len(records)
+    assert all(r.exc_info is None for r in records)
