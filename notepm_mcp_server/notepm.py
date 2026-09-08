@@ -281,6 +281,157 @@ def _retry_delay(attempt: int, response: httpx2.Response | None) -> float:
     return min(delay, MAX_RETRY_WAIT_SECONDS)
 
 
+# 失敗した応答の本文をログへ残すときの上限。原因の手がかりは先頭に出るため全文は要らず、
+# 長い HTML をそのまま流し込まないための歯止めでもある。
+ERROR_BODY_LOG_LIMIT = 200
+
+
+# API 由来の失敗は原因ごとに型を分ける。呼び出し側にとって、待てば直るのか（レート制限・
+# NotePM 側の障害・打ち切り）、設定を直すべきなのか（トークンの不正）、引数が誤っているのか
+# （存在しないページ）で取るべき行動が違うためである。型で分けておくと、call_notepm_tool の
+# ログ水準の出し分けのような判断もここに寄せられる。
+class NotePMError(Exception):
+    """NotePM とのやり取りで検出した失敗の基底"""
+
+
+class NotePMAPIError(NotePMError):
+    """NotePM API が成功以外のステータスを返したときのエラー
+
+    Attributes:
+        status_code (int): API が返した HTTP ステータスコード
+    """
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class NotePMAuthError(NotePMAPIError):
+    """API トークンが不正か、権限が足りないときのエラー"""
+
+
+class NotePMBadRequestError(NotePMAPIError):
+    """リクエストのパラメータを NotePM が受け付けなかったときのエラー"""
+
+
+class NotePMNotFoundError(NotePMAPIError):
+    """要求した対象が存在しないときのエラー"""
+
+
+class NotePMRateLimitError(NotePMAPIError):
+    """リクエスト制限を超えたときのエラー"""
+
+
+class NotePMServerError(NotePMAPIError):
+    """NotePM 側の処理が失敗したときのエラー"""
+
+
+class NotePMResponseError(NotePMError):
+    """応答を JSON として解釈できなかったときのエラー"""
+
+
+class NotePMTimeoutError(NotePMError):
+    """上限の時間までに応答を得られなかったときのエラー"""
+
+
+def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
+    """失敗した応答の本文を、DEBUG のときだけ先頭部分に限って記録します
+
+    本文には NotePM 側の理由説明が入るため切り分けには役立ちますが、何が含まれるかを
+    こちらでは決められないため、既定の水準では出しません。エラーメッセージにも載せません。
+    載せるとクライアント側の記録へそのまま流れ出てしまうためです。改行で偽のログ行を
+    作られないよう %r で出し、長さも ERROR_BODY_LOG_LIMIT までに抑えます。
+
+    Args:
+        summary (str): 何の応答かを示す短い説明
+        response (httpx2.Response): 失敗した応答
+    """
+    logger.debug("%s: body=%r", summary, response.text[:ERROR_BODY_LOG_LIMIT])
+
+
+def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> None:
+    """成功以外のステータスを、原因ごとの例外に振り分けて送出します
+
+    分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
+    400 / 401 / 404 / 429 / 500 を土台に、HTTP の標準的な意味で読める範囲まで広げて
+    います（権限不足の 403 を認証側へ、500 番台の全体を NotePM 側の失敗として扱う）。
+    そこから外れるステータスは意味を推測せず、汎用の NotePMAPIError のままにします。
+
+    Args:
+        response (httpx2.Response): API の応答
+        not_found_message (str): 404 のときのメッセージ。404 は「存在しない URL」を
+            表すだけで、何が見つからないのかは呼び出し元しか知らないため受け取ります。
+
+    Raises:
+        NotePMAPIError: ステータスが 200 以外の場合。原因により派生クラスを送出します。
+    """
+    status = response.status_code
+    if status == 200:
+        return
+
+    _log_failed_response_body(
+        f"NotePM API がエラーを返しました (HTTP {status})", response
+    )
+
+    if status in (401, 403):
+        raise NotePMAuthError(
+            f"NotePM API の認証に失敗しました (HTTP {status})。"
+            "NOTEPM_API_TOKEN が正しいか、そのトークンに対象を読む権限があるかを"
+            "確認してください。",
+            status,
+        )
+    if status == 400:
+        raise NotePMBadRequestError(
+            f"NotePM API がリクエストを受け付けませんでした (HTTP {status})。"
+            "指定したパラメータの値を見直してください。",
+            status,
+        )
+    if status == 404:
+        raise NotePMNotFoundError(not_found_message, status)
+    if status == 429:
+        raise NotePMRateLimitError(
+            f"NotePM API のリクエスト制限に達しました (HTTP {status})。"
+            "制限はユーザーごとに 1 分あたり 60 リクエストです。"
+            "少し時間をおいてから再試行してください。",
+            status,
+        )
+    if 500 <= status < 600:
+        raise NotePMServerError(
+            f"NotePM API の処理が失敗しました (HTTP {status})。"
+            "NotePM 側の一時的な障害の可能性があるため、"
+            "少し時間をおいてから再試行してください。",
+            status,
+        )
+    raise NotePMAPIError(
+        f"NotePM API から想定外の応答が返りました (HTTP {status})。", status
+    )
+
+
+def _load_json_response(response: httpx2.Response) -> Any:
+    """応答の本文を JSON として読み取ります
+
+    Args:
+        response (httpx2.Response): API の応答
+
+    Returns:
+        Any: JSON をデコードした結果
+
+    Raises:
+        NotePMResponseError: JSON として解釈できなかった場合
+    """
+    try:
+        return json.loads(response.text)
+    except json.JSONDecodeError as e:
+        _log_failed_response_body("JSON として解釈できなかった応答", response)
+        # 解釈に失敗した位置と理由は返すメッセージには載せない（利用者には手の出しよう
+        # がない）。運用者が追えるよう、本文と同じ水準で残す。
+        logger.debug("JSON の解釈に失敗しました: %s", e)
+        raise NotePMResponseError(
+            "NotePM API の応答を JSON として解釈できませんでした。"
+            "NotePM 側がメンテナンス中などで、JSON 以外を返している可能性があります。"
+        ) from e
+
+
 class NotePMAPIClient:
     """NotePM APIクライアント
 
@@ -334,18 +485,28 @@ class NotePMAPIClient:
             httpx2.Response: 最後の試行の応答（成否は問わない）
 
         Raises:
-            ValueError: 上限の時間までに応答を得られなかった場合
+            NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
             httpx2.TransportError: 最後の試行でも接続できなかった場合
         """
+        # 発行するリクエストは -vv でだけ残す。検索語は dict のまま渡すので値が repr に
+        # なり、page_code は PAGE_CODE_PATTERN で検証済みなので、どちらも改行で偽のログ行
+        # を作れない。Authorization はクライアントが持っていて、ここには現れない。
+        logger.debug("NotePM API を呼び出します: GET %s params=%s", url, params)
         try:
-            return await asyncio.wait_for(
+            response = await asyncio.wait_for(
                 self._get_with_retry(url, params), TOTAL_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError as e:
-            raise ValueError(
+            raise NotePMTimeoutError(
                 "NotePM APIからのデータ取得に失敗しました: "
-                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に結果を得られませんでした"
+                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に結果を得られませんでした。"
+                "時間をおいてから再試行してください。"
             ) from e
+
+        logger.debug(
+            "NotePM API から応答を受け取りました: status=%s", response.status_code
+        )
+        return response
 
     async def _get_with_retry(
         self, url: str, params: dict[str, Any] | None = None
@@ -406,24 +567,29 @@ class NotePMAPIClient:
                 NotePMConfig.max_body_length で切り詰める
 
         Raises:
-            ValueError: APIリクエストが失敗した場合
+            NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
+            NotePMResponseError: 応答をJSONとして解釈できなかった場合
+            NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
         """
         response = await self._get(
             self.config.api_base,
             params.model_dump(exclude_none=True),  # Noneの値を除外してパラメータを構築
         )
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
-            )
+        # チーム名が誤っているときに 404 が返るのかは実 API で確かめていない。
+        # NotePM のドキュメントも 404 を「存在しない URL」としか説明していないため、
+        # 手掛かりとして添えるに留め、原因は断定しない。
+        _raise_for_status(
+            response,
+            not_found_message=(
+                "NotePM API が対象を見つけられませんでした (HTTP 404)。"
+                "NOTEPM_TEAM の値が正しいかを確認してください。"
+            ),
+        )
 
-        try:
-            data = json.loads(response.text)
-            # 検索結果の本文を設定された文字数で制限
-            self._truncate_search_bodies(data, self.config.max_body_length)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON response: {e}")
+        data = _load_json_response(response)
+        # 検索結果の本文を設定された文字数で制限
+        self._truncate_search_bodies(data, self.config.max_body_length)
         return json.dumps(data, ensure_ascii=False)
 
     async def get_notepm_page_detail(self, params: NotePMDetailParams) -> str:
@@ -442,24 +608,27 @@ class NotePMAPIClient:
             str: 詳細取得結果のJSON文字列。本文は切り詰めない
 
         Raises:
-            ValueError: APIリクエストが失敗した場合
+            NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
+            NotePMResponseError: 応答をJSONとして解釈できなかった場合
+            NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
         """
         # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
         # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
         url = f"{self.config.api_base}/{params.page_code}"
         response = await self._get(url)
 
-        if response.status_code != 200:
-            raise ValueError(
-                f"NotePM APIからのデータ取得に失敗しました: {response.status_code} {response.text}"
-            )
+        _raise_for_status(
+            response,
+            not_found_message=(
+                f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
+                "notepm_search の検索結果に含まれる page_code を渡しているか、"
+                "そのページが削除されていないかを確認してください。"
+            ),
+        )
 
-        try:
-            data = json.loads(response.text)
-            # 本文は切り詰めない（理由は docstring の「応答サイズの方針」を参照）
-            return json.dumps(data, ensure_ascii=False)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON response: {e}")
+        data = _load_json_response(response)
+        # 本文は切り詰めない（理由は docstring の「応答サイズの方針」を参照）
+        return json.dumps(data, ensure_ascii=False)
 
     def _truncate_search_bodies(self, data: Any, max_length: int) -> None:
         """検索結果の各ページの本文を指定された文字数で省略します
@@ -527,9 +696,12 @@ async def call_notepm_tool(
     異常は例外を送出せず、必ず is_error=True の結果として返します。ツールの失敗は
     クライアントが読める応答であるべきで、JSON-RPC のエラーにする必要がないためです。
 
-    ログの水準は原因で分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
-    未知のツール名）は防御が働いた結果でサーバーの不具合ではないため、警告として
-    値だけを残します。それ以外は想定外の失敗なので、トレースバック付きで記録します。
+    ログの水準は原因で三段に分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
+    未知のツール名）は防御が働いた結果なので、警告として値だけを残します。NotePM との
+    やり取りで生じた失敗（認証・存在しないページ・レート制限・打ち切りなど）も、原因は
+    分類済みのメッセージが持っているため警告に留めます。どちらもサーバーの不具合では
+    なく、トレースバックが原因の特定に寄与しないためです。それ以外は想定外の失敗なので、
+    トレースバック付きで記録します。
 
     Args:
         client (NotePMAPIClient): サーバーが保持している API クライアント
@@ -539,6 +711,8 @@ async def call_notepm_tool(
         types.CallToolResult: ツールの実行結果。失敗時は is_error=True の結果。
     """
     arguments = params.arguments or {}
+    # ツール名は検証されていない外部由来の値なので、どの水準でも %r で 1 行に収める。
+    logger.info("ツール %r を実行します", params.name)
     try:
         if params.name == "notepm_search":
             search_params = SearchParams(**arguments)
@@ -551,9 +725,15 @@ async def call_notepm_tool(
     except (ValidationError, UnknownToolError) as e:
         # 呼び出しの拒否は想定内。トレースバックは原因の特定に寄与せず、LLM が
         # 組み立てた値が届くたびに ERROR が並ぶと、本当の異常が埋もれる。
-        # ツール名は検証されていない外部由来の値なので、%r で改行ごと落とす。
-        # 生のまま出すと、改行を含む名前で偽のログ行を作られる。
         logger.warning("ツール %r の呼び出しを受け付けませんでした: %s", params.name, e)
+        return types.CallToolResult(
+            content=[TextContent(type="text", text=str(e))], is_error=True
+        )
+    except NotePMError as e:
+        # NotePM とのやり取りで生じた失敗。分類済みのメッセージがそのまま原因を示す
+        # ため、トレースバックは付けない。応答本文は _log_failed_response_body が
+        # DEBUG のときだけ残す。
+        logger.warning("ツール %r の実行が失敗しました: %s", params.name, e)
         return types.CallToolResult(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
@@ -563,6 +743,7 @@ async def call_notepm_tool(
             content=[TextContent(type="text", text=str(e))], is_error=True
         )
 
+    logger.info("ツール %r が %d 文字の結果を返しました", params.name, len(result))
     return types.CallToolResult(content=[TextContent(type="text", text=result)])
 
 
@@ -609,6 +790,7 @@ def create_server(config: NotePMConfig) -> Server[NotePMAPIClient]:
         params: types.PaginatedRequestParams | None,
     ) -> types.ListToolsResult:
         """利用可能なツールのリストを返します"""
+        logger.debug("ツールの一覧を返します")
         return types.ListToolsResult(
             tools=[
                 Tool(
@@ -662,6 +844,12 @@ async def serve() -> None:
     config = NotePMConfig()
     server = create_server(config)
 
+    # 起動できたことと接続先を残す。API トークンは出さない。
+    logger.info(
+        "NotePM MCP サーバーを起動します: version=%s", get_server_version() or "不明"
+    )
+    logger.debug("接続先の NotePM API: %s", config.api_base)
+
     # サーバーの初期化オプションを作成
     options = server.create_initialization_options()
     # 標準入出力を使用してサーバーを起動
@@ -672,3 +860,7 @@ async def serve() -> None:
             options,
             raise_exceptions=config.raise_exceptions,
         )
+
+    # 標準入力が閉じられれば server.run() から戻る。クライアントが落としたのか、
+    # サーバーが自ら止まったのかを後から切り分けられるようにしておく。
+    logger.info("NotePM MCP サーバーを終了します")

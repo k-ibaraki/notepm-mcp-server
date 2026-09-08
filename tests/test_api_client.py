@@ -1,4 +1,8 @@
-"""NotePMAPIClient の検索・詳細取得の振る舞いを検証する。"""
+"""NotePMAPIClient が応答をどう組み立て、どこまで送り直すかを検証する。
+
+失敗をどう分類し、何をログに出すかは test_api_errors.py にある。ここでは、その分類に
+至るまでの送信の振る舞い（再試行するかどうか、打ち切り）を扱う。
+"""
 
 import asyncio
 import json
@@ -95,29 +99,17 @@ async def test_search_uses_max_body_length_from_env(
     assert json.loads(result)["pages"][0]["body"] == "あ" * 10 + "..."
 
 
-async def test_search_raises_on_error_status(
+async def test_auth_error_is_not_retried(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:
     requests = mock_api(lambda request: httpx2.Response(401, text="Unauthorized"))
 
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(notepm.NotePMAuthError):
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
-    assert "401" in str(error.value)
-    assert "Unauthorized" in str(error.value)
     # 認証エラーは何度送っても同じ答えなので、再試行しない
     assert len(requests) == 1
-
-
-async def test_search_raises_on_broken_json(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(200, text="<html>maintenance</html>"))
-
-    with pytest.raises(ValueError, match="Invalid JSON response"):
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.search(notepm.SearchParams(q="議事録"))
 
 
 async def test_detail_requests_page_code_and_keeps_full_body(
@@ -135,33 +127,6 @@ async def test_detail_requests_page_code_and_keeps_full_body(
     assert str(requests[0].url) == f"{API_BASE}/abc123"
     # 詳細取得では本文を切り詰めない
     assert json.loads(result)["page"]["body"] == body
-
-
-async def test_detail_raises_on_error_status(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(404, text="Not Found"))
-
-    with pytest.raises(ValueError) as error:
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.get_notepm_page_detail(
-                notepm.NotePMDetailParams(page_code="missing")
-            )
-
-    assert "404" in str(error.value)
-    assert "Not Found" in str(error.value)
-
-
-async def test_detail_raises_on_broken_json(
-    config: notepm.NotePMConfig, mock_api: InstallMock
-) -> None:
-    mock_api(lambda request: httpx2.Response(200, text="not json"))
-
-    with pytest.raises(ValueError, match="Invalid JSON response"):
-        async with notepm.NotePMAPIClient(config) as client:
-            await client.get_notepm_page_detail(
-                notepm.NotePMDetailParams(page_code="abc123")
-            )
 
 
 async def test_client_is_closed_after_context_exit(
@@ -237,7 +202,7 @@ async def test_search_gives_up_after_max_attempts(
     """一時的なサーバーエラーが続く場合は、上限まで試してエラーにする。"""
     requests = mock_api(lambda request: httpx2.Response(503, text="Unavailable"))
 
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(notepm.NotePMServerError) as error:
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
@@ -263,7 +228,7 @@ async def test_search_stops_at_the_total_timeout(
 
     mock_api(never_answers)
 
-    with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
+    with pytest.raises(notepm.NotePMTimeoutError, match="秒以内に結果を得られませんでした"):
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
@@ -283,7 +248,7 @@ async def test_total_timeout_also_bounds_the_retry_waits(
 
     requests = mock_api(lambda request: httpx2.Response(503, text="Unavailable"))
 
-    with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
+    with pytest.raises(notepm.NotePMTimeoutError, match="秒以内に結果を得られませんでした"):
         async with notepm.NotePMAPIClient(config) as client:
             await client.search(notepm.SearchParams(q="議事録"))
 
@@ -310,7 +275,7 @@ async def test_client_survives_a_total_timeout(
     mock_api(slow_then_fast)
 
     async with notepm.NotePMAPIClient(config) as client:
-        with pytest.raises(ValueError, match="秒以内に結果を得られませんでした"):
+        with pytest.raises(notepm.NotePMTimeoutError, match="秒以内に結果を得られませんでした"):
             await client.search(notepm.SearchParams(q="遅い"))
 
         # 二度目は本来の上限で送る。詰めた上限のままだと、遅い環境で

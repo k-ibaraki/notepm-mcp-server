@@ -22,6 +22,33 @@ from notepm_mcp_server import notepm
 from .conftest import API_TOKEN, TEAM, InstallMock
 
 
+@pytest.fixture
+def served_without_stdio(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """serve() を標準入出力へ繋がずに走らせ、server.run() へ渡った値を記録する。
+
+    stdio_server は実際の標準入出力を掴んでしまい、server.run() は入力が閉じるまで
+    返らない。どちらも差し替えないと serve() の前後を確かめられない。
+    """
+    recorded: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def fake_stdio_server() -> AsyncIterator[tuple[object, object]]:
+        yield (object(), object())
+
+    async def fake_run(
+        self: Server[Any],
+        read_stream: object,
+        write_stream: object,
+        initialization_options: object,
+        raise_exceptions: bool = False,
+    ) -> None:
+        recorded["raise_exceptions"] = raise_exceptions
+
+    monkeypatch.setattr(notepm, "stdio_server", fake_stdio_server)
+    monkeypatch.setattr(Server, "run", fake_run)
+    return recorded
+
+
 async def test_list_tools_exposes_both_tools(config: notepm.NotePMConfig) -> None:
     async with Client(notepm.create_server(config)) as client:
         result = await client.list_tools()
@@ -46,7 +73,7 @@ async def test_tool_failure_keeps_the_connection_alive(
 
     mock_api(handler)
 
-    with caplog.at_level(logging.ERROR, logger=notepm.__name__):
+    with caplog.at_level(logging.WARNING, logger=notepm.__name__):
         async with Client(notepm.create_server(config)) as client:
             failed = await client.call_tool("notepm_search", {"q": "失敗"})
             succeeded = await client.call_tool("notepm_search", {"q": "成功"})
@@ -54,11 +81,13 @@ async def test_tool_failure_keeps_the_connection_alive(
     assert failed.is_error is True
     assert succeeded.is_error is False
 
-    # 想定外の失敗は握りつぶさず、トレースバックを残す（原因を追える）
+    # 握りつぶさず記録は残す。500 は再試行の対象なので、その警告に続いて分類済みの
+    # 失敗が最後に残る。NotePM 側の失敗なのでトレースバックは付けない
+    # （水準の出し分けは tests/test_call_tool_dispatch.py で押さえている）
     records = [r for r in caplog.records if r.name == notepm.__name__]
-    assert [(r.levelno, r.exc_info is not None) for r in records] == [
-        (logging.ERROR, True)
-    ]
+    assert [r.levelno for r in records] == [logging.WARNING] * len(records)
+    assert all(r.exc_info is None for r in records)
+    assert "HTTP 500" in records[-1].getMessage()
 
 
 async def test_http_client_is_shared_across_tool_calls(
@@ -138,7 +167,10 @@ async def test_unexpected_exception_does_not_stop_the_server(
     ],
 )
 async def test_serve_passes_raise_exceptions_from_config(
-    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: bool
+    monkeypatch: pytest.MonkeyPatch,
+    served_without_stdio: dict[str, object],
+    env_value: str | None,
+    expected: bool,
 ) -> None:
     """serve() は NotePMConfig の値をそのまま server.run() へ渡す。"""
     monkeypatch.setenv("NOTEPM_TEAM", TEAM)
@@ -146,24 +178,42 @@ async def test_serve_passes_raise_exceptions_from_config(
     if env_value is not None:
         monkeypatch.setenv("NOTEPM_RAISE_EXCEPTIONS", env_value)
 
-    recorded: dict[str, object] = {}
-
-    @asynccontextmanager
-    async def fake_stdio_server() -> AsyncIterator[tuple[object, object]]:
-        yield (object(), object())
-
-    async def fake_run(
-        self: Server[Any],
-        read_stream: object,
-        write_stream: object,
-        initialization_options: object,
-        raise_exceptions: bool = False,
-    ) -> None:
-        recorded["raise_exceptions"] = raise_exceptions
-
-    monkeypatch.setattr(notepm, "stdio_server", fake_stdio_server)
-    monkeypatch.setattr(Server, "run", fake_run)
-
     await notepm.serve()
 
-    assert recorded["raise_exceptions"] is expected
+    assert served_without_stdio["raise_exceptions"] is expected
+
+
+async def test_serve_logs_the_start_and_the_end(
+    monkeypatch: pytest.MonkeyPatch,
+    served_without_stdio: dict[str, object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """-v 相当の水準まで下げると、サーバーが動き始めたことと終わったことを追える。
+
+    MCP クライアント越しに起動していると、設定を読めずに死んだのか、繋がったうえで
+    黙っているのかを利用者は区別できない。その手掛かりを残す（Issue #11）。
+    """
+    monkeypatch.setenv("NOTEPM_TEAM", TEAM)
+    monkeypatch.setenv("NOTEPM_API_TOKEN", API_TOKEN)
+
+    with caplog.at_level(logging.INFO, logger=notepm.__name__):
+        await notepm.serve()
+
+    messages = [r.getMessage() for r in caplog.records if r.name == notepm.__name__]
+    assert len(messages) == 2
+    assert "起動" in messages[0]
+    assert "終了" in messages[1]
+    # 接続先は DEBUG に落とす。API トークンはどの水準でも出さない
+    assert all(API_TOKEN not in message for message in messages)
+
+
+async def test_listing_tools_is_traceable_at_debug(
+    config: notepm.NotePMConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ツール一覧の取得も -vv なら記録に残る。既定の水準では出さない。"""
+    with caplog.at_level(logging.DEBUG, logger=notepm.__name__):
+        async with Client(notepm.create_server(config)) as client:
+            await client.list_tools()
+
+    records = [r for r in caplog.records if r.name == notepm.__name__]
+    assert [r.levelno for r in records] == [logging.DEBUG]
