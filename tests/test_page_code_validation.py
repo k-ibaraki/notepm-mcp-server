@@ -88,6 +88,20 @@ def test_accepts_ordinary_page_codes(page_code: str) -> None:
     assert notepm.NotePMDetailParams(page_code=page_code).page_code == page_code
 
 
+def test_rejects_page_codes_longer_than_the_limit() -> None:
+    """長さの上限を超える値は受け付けない。
+
+    文字種だけを縛っても長さは無制限になる。失敗した page_code はエラーメッセージへ
+    そのまま載るため、上限が無いと誤った値が届くたびにその全長が呼び出し側の文脈と
+    ログへ流れる。上限そのものは通ることも併せて固定する。
+    """
+    limit = notepm.PAGE_CODE_MAX_LENGTH
+    assert notepm.NotePMDetailParams(page_code="a" * limit).page_code == "a" * limit
+
+    with pytest.raises(ValidationError):
+        notepm.NotePMDetailParams(page_code="a" * (limit + 1))
+
+
 @pytest.mark.parametrize("page_code", UNSAFE_PAGE_CODES)
 async def test_unsafe_page_code_is_rejected_before_any_request(
     config: notepm.NotePMConfig, mock_api: InstallMock, page_code: str
@@ -160,6 +174,7 @@ def test_page_code_constraint_is_published_in_the_tool_schema() -> None:
     page_code = schema["properties"]["page_code"]
 
     assert page_code["pattern"] == notepm.PAGE_CODE_PATTERN
+    assert page_code["maxLength"] == notepm.PAGE_CODE_MAX_LENGTH
     assert page_code["description"]
 
 

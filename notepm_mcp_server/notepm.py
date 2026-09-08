@@ -212,6 +212,12 @@ class SearchParams(BaseModel):
 # 公開スキーマ(ECMA-262)のほうが厳しい向きになるため、そのままにしている。
 PAGE_CODE_PATTERN = r"^[^\s/\\.?#%:\x00-\x1f\x7f\x80-\x9f]+$"
 
+# page_code の長さの上限。NotePM のページコードは 10 文字だが、桁数が変わっても困らない
+# よう余裕を取る。上限が要るのは、失敗した page_code をエラーメッセージへ載せるように
+# したためである（get_notepm_page_detail を参照）。長さを縛らないと、誤った値が届くたび
+# にその全長が呼び出し側の文脈とログへ流れる。
+PAGE_CODE_MAX_LENGTH = 128
+
 
 # SearchParams と同じく、この docstring は notepm_page_detail の入力スキーマの
 # description として公開される。保守者向けのメモはこちらのコメントへ書くこと。
@@ -222,10 +228,12 @@ class NotePMDetailParams(BaseModel):
         str,
         Field(
             pattern=PAGE_CODE_PATTERN,
+            max_length=PAGE_CODE_MAX_LENGTH,
             description=(
                 "取得するページのページコード（例: aaaaad0001）。"
                 "notepm_search の検索結果に含まれる page_code をそのまま渡す。"
                 "空白・制御文字と / \\ . ? # % : は使えない。"
+                f"長さは {PAGE_CODE_MAX_LENGTH} 文字まで。"
             ),
         ),
     ]
@@ -350,7 +358,12 @@ class NotePMAuthError(NotePMAPIError):
 
 
 class NotePMBadRequestError(NotePMAPIError):
-    """リクエストのパラメータを NotePM が受け付けなかったときのエラー"""
+    """NotePM がリクエストを受け付けなかったときのエラー
+
+    パラメータの誤りだけでなく、詳細取得で対象のページに辿り着けない場合もここに
+    入ります。実 API が存在しない page_code に 404 ではなく 400 を返すためです
+    （Issue #31）。
+    """
 
 
 class NotePMNotFoundError(NotePMAPIError):
@@ -680,12 +693,13 @@ class NotePMAPIClient:
             response,
             not_found_message=(
                 f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
-                "notepm_search の検索結果に含まれる page_code を渡しているか、"
-                "そのページが削除されていないかを確認してください。"
+                "notepm_search の検索結果に含まれる page_code を渡しているかを"
+                "確認してください。"
             ),
             bad_request_message=(
                 f"指定されたページを取得できません (HTTP 400): page_code={params.page_code}。"
-                "そのページが存在しないか、API トークンに読む権限が無い可能性があります。"
+                "そのページが存在しないか、NOTEPM_API_TOKEN のトークンに"
+                "そのページを読む権限が無い可能性があります。"
                 "notepm_search の検索結果に含まれる page_code を渡しているかを"
                 "確認してください。"
             ),
