@@ -4,7 +4,7 @@
 """
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import httpx2
@@ -18,7 +18,10 @@ TEAM = "example-team"
 API_TOKEN = "test-token"
 API_BASE = f"https://{TEAM}.notepm.jp/api/v1/pages"
 
-Handler = Callable[[httpx2.Request], httpx2.Response]
+# 応答を遅らせたいテストのために、async のハンドラも受け取れるようにしておく。
+# MockTransport は Response 以外が返ってきたら await する。
+HandlerResult = httpx2.Response | Coroutine[None, None, httpx2.Response]
+Handler = Callable[[httpx2.Request], HandlerResult]
 InstallMock = Callable[[Handler], list[httpx2.Request]]
 
 # 差し替え前の本物のクライアント。forbid_real_http で置き換わる前に捕まえておく。
@@ -46,17 +49,34 @@ def clear_notepm_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def forbid_real_http(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mock_api を使わずに HTTP クライアントを生成したら失敗させる。
+    """mock_api を使わずに送られた HTTP リクエストを失敗させる。
 
     モックの差し替えを書き忘れたテストが、実際の NotePM API へ出ていくのを防ぐ。
+    禁じるのは送信だけで、生成は通す。サーバーの lifespan が起動のたびに
+    クライアントを作るため、生成を禁じると HTTP を使わないテストまで落ちる。
     """
 
-    def guard(**kwargs: Any) -> httpx2.AsyncClient:
+    def refuse(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError(
             "実 API へ接続しようとしました。mock_api フィクスチャで応答を差し替えてください。"
         )
 
+    def guard(**kwargs: Any) -> httpx2.AsyncClient:
+        kwargs["transport"] = httpx2.MockTransport(refuse)
+        return _REAL_ASYNC_CLIENT(**kwargs)
+
     monkeypatch.setattr(notepm.httpx2, "AsyncClient", guard)
+
+
+@pytest.fixture(autouse=True)
+def no_retry_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """再試行の待ち時間を 0 にして、テストが実時間を待たないようにする。
+
+    待ち時間の決め方そのものは _retry_delay() の単体テストで固定する
+    （tests/test_retry_policy.py）。
+    """
+    monkeypatch.setattr(notepm, "RETRY_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setattr(notepm, "MAX_RETRY_WAIT_SECONDS", 0.0)
 
 
 @pytest.fixture
@@ -79,9 +99,12 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> InstallMock:
     def install(handler: Handler) -> list[httpx2.Request]:
         requests: list[httpx2.Request] = []
 
-        def recording_handler(request: httpx2.Request) -> httpx2.Response:
+        async def recording_handler(request: httpx2.Request) -> httpx2.Response:
             requests.append(request)
-            return handler(request)
+            result = handler(request)
+            if isinstance(result, httpx2.Response):
+                return result
+            return await result
 
         transport = httpx2.MockTransport(recording_handler)
 

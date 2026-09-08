@@ -4,13 +4,17 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 from pydantic import BaseModel, Field, ValidationError
 import httpx2
+import asyncio
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from types import TracebackType
 from typing import Annotated, Any, Literal, Optional
 from dotenv import load_dotenv
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import logging
+import math
 
 # 環境変数の読み込み
 load_dotenv()
@@ -188,10 +192,102 @@ class NotePMDetailParams(BaseModel):
     ]
 
 
+# httpx2 の既定は全体で 5 秒。全文検索は件数によっては数秒かかるため、読み取りだけ
+# 長めに取り、接続とプール待ちは短いままにする。詰まっている相手を長く待つより、
+# 早く失敗してエラーとして返したほうが呼び出し側は次の手を打てる。
+HTTP_TIMEOUT = httpx2.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
+
+# stdio のサーバーは 1 クライアントからの逐次呼び出ししか受けないため、接続数は
+# 少しでよい。keepalive_expiry を既定の 5 秒から伸ばすのは、検索してから詳細を取る
+# までに呼び出し側の思考時間が挟まり、5 秒では張った接続が毎回捨てられるため。
+# 伸ばした分だけサーバー側から切られた接続を掴む機会は増えるが、それは再試行が拾う。
+HTTP_LIMITS = httpx2.Limits(
+    max_connections=10, max_keepalive_connections=10, keepalive_expiry=60.0
+)
+
+# 再試行の対象とする状態コード。429 はレート制限、5xx は一時的なサーバー側の失敗で、
+# いずれも待てば結果が変わり得る。認証エラーのような他の 4xx は何度送っても同じ答えが
+# 返るだけなので、API に無駄な負荷をかけないよう対象にしない。
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# 再試行する転送エラー。接続を張れなかった場合と、張り置いた接続が相手に切られていた
+# 場合（RemoteProtocolError）だけを拾う。ReadTimeout を含めると、応答を返さない相手に
+# 対して待ち時間が試行回数の分だけ積み上がるため、あえて含めない。
+RETRYABLE_TRANSPORT_ERRORS = (
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.RemoteProtocolError,
+)
+
+# 初回を含めた試行回数の上限。ツール呼び出しが長く戻らないほうが困るので、深追いしない。
+MAX_ATTEMPTS = 3
+
+# 再試行と待ち時間まで含めた、1 回の呼び出しの上限。試行ごとの上限しか持たないと、
+# 読み取り 30 秒 × 3 試行で 90 秒を超え得る。MCP のホスト側にも独自の制限があり
+# （Claude Code の MCP_TOOL_TIMEOUT など）、そちらに先に打ち切られると理由が呼び出し
+# 側に伝わらないため、こちらで上限を持って明示的なエラーとして返す。
+TOTAL_TIMEOUT_SECONDS = 60.0
+
+# 1 回目の再試行までの待ち時間。以降は試行ごとに倍にする。
+RETRY_BACKOFF_SECONDS = 0.5
+
+# 待ち時間の上限。Retry-After は相手が決める値なので、大きな値をそのまま信じると
+# ツール呼び出しが戻らなくなる。
+MAX_RETRY_WAIT_SECONDS = 10.0
+
+
+def _retry_after_seconds(response: httpx2.Response) -> float | None:
+    """Retry-After ヘッダを秒数として読みます
+
+    Args:
+        response (httpx2.Response): 再試行対象の応答
+
+    Returns:
+        float | None: 秒数。ヘッダが無い場合と、HTTP-date のように
+            秒数として読めない場合は None。
+    """
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        # HTTP-date 形式は解釈しない。読めない値はバックオフに任せる。
+        return None
+    if not math.isfinite(seconds):
+        # float() は "nan" や "inf" も受け付ける。nan は上限で丸めても nan のまま
+        # sleep へ渡ってしまうため、ヘッダが無かったものとして扱う。
+        return None
+    return max(seconds, 0.0)
+
+
+def _retry_delay(attempt: int, response: httpx2.Response | None) -> float:
+    """次の試行までに待つ秒数を返します
+
+    Args:
+        attempt (int): 失敗した試行の番号（1 始まり）
+        response (httpx2.Response | None): 失敗した応答。転送エラーなら None
+
+    Returns:
+        float: 待ち時間（秒）。Retry-After が読めればそれを優先し、
+            読めなければ指数バックオフに落とす。いずれも上限で丸める。
+    """
+    # 試行ごとに倍にする（1 << n は 2 の n 乗）
+    delay = RETRY_BACKOFF_SECONDS * (1 << (attempt - 1))
+    if response is not None:
+        retry_after = _retry_after_seconds(response)
+        if retry_after is not None:
+            delay = retry_after
+    return min(delay, MAX_RETRY_WAIT_SECONDS)
+
+
 class NotePMAPIClient:
     """NotePM APIクライアント
 
     非同期HTTPクライアントを使用してNotePM APIと通信を行います。
+    サーバーの生存期間にひとつだけ作り、呼び出しをまたいで使い回す前提です
+    （create_server() の lifespan を参照）。呼び出しごとに作り直すと、TLS の
+    ハンドシェイクとコネクションプールが毎回捨てられます。
     コンテキストマネージャとして使用することで、リソースの適切な解放を保証します。
     """
 
@@ -201,7 +297,13 @@ class NotePMAPIClient:
             config (NotePMConfig): API設定
         """
         self.config = config
-        self._client = httpx2.AsyncClient()
+        # 認証ヘッダは毎回同じなのでクライアントに持たせる。タイムアウトと接続数は
+        # 既定任せにせず、上の定数で明示する。
+        self._client = httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {config.api_token}"},
+            timeout=HTTP_TIMEOUT,
+            limits=HTTP_LIMITS,
+        )
 
     async def __aenter__(self) -> "NotePMAPIClient":
         """非同期コンテキストマネージャのエントリーポイント"""
@@ -219,6 +321,80 @@ class NotePMAPIClient:
         """
         await self._client.aclose()
 
+    async def _get(
+        self, url: str, params: dict[str, Any] | None = None
+    ) -> httpx2.Response:
+        """GET を発行します。再試行と待ち時間を含めて上限の時間で打ち切ります
+
+        Args:
+            url (str): 送信先の URL
+            params (dict[str, Any] | None): クエリパラメータ
+
+        Returns:
+            httpx2.Response: 最後の試行の応答（成否は問わない）
+
+        Raises:
+            ValueError: 上限の時間までに応答を得られなかった場合
+            httpx2.TransportError: 最後の試行でも接続できなかった場合
+        """
+        try:
+            return await asyncio.wait_for(
+                self._get_with_retry(url, params), TOTAL_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as e:
+            raise ValueError(
+                "NotePM APIからのデータ取得に失敗しました: "
+                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に結果を得られませんでした"
+            ) from e
+
+    async def _get_with_retry(
+        self, url: str, params: dict[str, Any] | None = None
+    ) -> httpx2.Response:
+        """GET を発行し、一時的な失敗であれば間を置いて再試行します
+
+        再試行するのは、待てば結果が変わり得る失敗だけです（レート制限・一時的な
+        サーバーエラー・接続の確立失敗・切られていた接続）。恒久的な失敗は最初の
+        応答をそのまま返し、判断は呼び出し元に委ねます。
+
+        Args:
+            url (str): 送信先の URL
+            params (dict[str, Any] | None): クエリパラメータ
+
+        Returns:
+            httpx2.Response: 最後の試行の応答（成否は問わない）
+
+        Raises:
+            httpx2.TransportError: 最後の試行でも接続できなかった場合
+        """
+        for attempt in range(1, MAX_ATTEMPTS):
+            try:
+                response = await self._client.get(url, params=params)
+            except RETRYABLE_TRANSPORT_ERRORS as e:
+                delay = _retry_delay(attempt, None)
+                # 例外の文言にはサーバー由来の受信データが混ざり得る。ツール名と
+                # 同じく %r で改行ごと落とし、偽のログ行を作られないようにする。
+                logger.warning(
+                    "NotePM API への接続に失敗しました（%d 回目、%.1f 秒後に再試行）: %r",
+                    attempt,
+                    delay,
+                    e,
+                )
+            else:
+                if response.status_code not in RETRYABLE_STATUS_CODES:
+                    return response
+                delay = _retry_delay(attempt, response)
+                # 応答本文は外部由来なのでログに出さない。状態コードだけで追える。
+                logger.warning(
+                    "NotePM API が %d を返しました（%d 回目、%.1f 秒後に再試行）",
+                    response.status_code,
+                    attempt,
+                    delay,
+                )
+            await asyncio.sleep(delay)
+
+        # 最後の試行は結果をそのまま返す。ここでの失敗は呼び出し元がエラーにする。
+        return await self._client.get(url, params=params)
+
     async def search(self, params: SearchParams) -> str:
         """NotePMの検索APIを呼び出します
 
@@ -232,11 +408,9 @@ class NotePMAPIClient:
         Raises:
             ValueError: APIリクエストが失敗した場合
         """
-        headers = {"Authorization": f"Bearer {self.config.api_token}"}
-        response = await self._client.get(
+        response = await self._get(
             self.config.api_base,
-            params=params.model_dump(exclude_none=True),  # Noneの値を除外してパラメータを構築
-            headers=headers,
+            params.model_dump(exclude_none=True),  # Noneの値を除外してパラメータを構築
         )
 
         if response.status_code != 200:
@@ -270,11 +444,10 @@ class NotePMAPIClient:
         Raises:
             ValueError: APIリクエストが失敗した場合
         """
-        headers = {"Authorization": f"Bearer {self.config.api_token}"}
         # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
         # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
         url = f"{self.config.api_base}/{params.page_code}"
-        response = await self._client.get(url, headers=headers)
+        response = await self._get(url)
 
         if response.status_code != 200:
             raise ValueError(
@@ -347,7 +520,7 @@ class UnknownToolError(ValueError):
 
 
 async def call_notepm_tool(
-    config: NotePMConfig, params: types.CallToolRequestParams
+    client: NotePMAPIClient, params: types.CallToolRequestParams
 ) -> types.CallToolResult:
     """ツール呼び出しを実行し、結果を CallToolResult として返します
 
@@ -359,7 +532,7 @@ async def call_notepm_tool(
     値だけを残します。それ以外は想定外の失敗なので、トレースバック付きで記録します。
 
     Args:
-        config (NotePMConfig): API設定
+        client (NotePMAPIClient): サーバーが保持している API クライアント
         params (types.CallToolRequestParams): ツール名と引数
 
     Returns:
@@ -369,12 +542,10 @@ async def call_notepm_tool(
     try:
         if params.name == "notepm_search":
             search_params = SearchParams(**arguments)
-            async with NotePMAPIClient(config) as client:
-                result = await client.search(search_params)
+            result = await client.search(search_params)
         elif params.name == "notepm_page_detail":
             detail_params = NotePMDetailParams(**arguments)
-            async with NotePMAPIClient(config) as client:
-                result = await client.get_notepm_page_detail(detail_params)
+            result = await client.get_notepm_page_detail(detail_params)
         else:
             raise UnknownToolError(f"不明なツールです: {params.name!r}")
     except (ValidationError, UnknownToolError) as e:
@@ -409,7 +580,7 @@ DEFAULT_DETAIL_DESCRIPTION = (
 )
 
 
-def create_server(config: NotePMConfig) -> Server[dict[str, Any]]:
+def create_server(config: NotePMConfig) -> Server[NotePMAPIClient]:
     """ツールを登録した MCP サーバーを組み立てます
 
     stdio への接続を含まないため、テストからは in-process のクライアントで
@@ -419,11 +590,22 @@ def create_server(config: NotePMConfig) -> Server[dict[str, Any]]:
         config (NotePMConfig): API設定
 
     Returns:
-        Server[dict[str, Any]]: 起動可能な状態のサーバー
+        Server[NotePMAPIClient]: 起動可能な状態のサーバー
     """
 
+    @asynccontextmanager
+    async def lifespan(server: Server[NotePMAPIClient]) -> AsyncIterator[NotePMAPIClient]:
+        """API クライアントをサーバーの生存期間に合わせて開閉します
+
+        server.run() の内側で開かれ、抜けるときに閉じられます。ツール呼び出しは
+        ctx.lifespan_context からこのクライアントを受け取るため、検索から詳細取得
+        までが同じ接続に乗り、停止時には接続が確実に解放されます。
+        """
+        async with NotePMAPIClient(config) as client:
+            yield client
+
     async def on_list_tools(
-        ctx: ServerRequestContext[dict[str, Any]],
+        ctx: ServerRequestContext[NotePMAPIClient],
         params: types.PaginatedRequestParams | None,
     ) -> types.ListToolsResult:
         """利用可能なツールのリストを返します"""
@@ -447,23 +629,25 @@ def create_server(config: NotePMConfig) -> Server[dict[str, Any]]:
         )
 
     async def on_call_tool(
-        ctx: ServerRequestContext[dict[str, Any]],
+        ctx: ServerRequestContext[NotePMAPIClient],
         params: types.CallToolRequestParams,
     ) -> types.CallToolResult:
         """クライアントからのツール呼び出しを処理します
 
         Args:
-            ctx (ServerRequestContext): リクエストごとのコンテキスト
+            ctx (ServerRequestContext): リクエストごとのコンテキスト。
+                lifespan_context に API クライアントが入っている
             params (types.CallToolRequestParams): ツール名と引数
 
         Returns:
             types.CallToolResult: ツールの実行結果
         """
-        return await call_notepm_tool(config, params)
+        return await call_notepm_tool(ctx.lifespan_context, params)
 
     return Server(
         "notepm-mcp",
         version=get_server_version(),
+        lifespan=lifespan,
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
     )

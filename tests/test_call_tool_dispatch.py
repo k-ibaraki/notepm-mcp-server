@@ -24,10 +24,11 @@ async def test_search_tool_reaches_the_search_endpoint(
     payload = {"pages": [{"title": "議事録", "body": "本文"}]}
     requests = mock_api(lambda request: httpx2.Response(200, json=payload))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(name="notepm_search", arguments={"q": "議事録"}),
+        )
 
     assert result.is_error is False
     assert json.loads(content_text(result)) == payload
@@ -41,10 +42,11 @@ async def test_unknown_tool_returns_error_instead_of_raising(
 ) -> None:
     requests = mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
-    result = await notepm.call_notepm_tool(
-        config,
-        types.CallToolRequestParams(name="notepm_unknown", arguments={}),
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client,
+            types.CallToolRequestParams(name="notepm_unknown", arguments={}),
+        )
 
     assert result.is_error is True
     # どのツール名が届いたのかを呼び出し側が判別できる
@@ -58,9 +60,10 @@ async def test_missing_required_argument_returns_error(
     """引数不足も例外にせず、HTTP を発行せずにエラーとして返す。"""
     requests = mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
 
-    result = await notepm.call_notepm_tool(
-        config, types.CallToolRequestParams(name="notepm_search", arguments=None)
-    )
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await notepm.call_notepm_tool(
+            client, types.CallToolRequestParams(name="notepm_search", arguments=None)
+        )
 
     assert result.is_error is True
     assert "q" in content_text(result)
@@ -75,9 +78,10 @@ async def test_unknown_tool_is_logged_as_a_rejection(
     サーバーの不具合ではないため、トレースバック付きの ERROR にはしない。
     """
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        await notepm.call_notepm_tool(
-            config, types.CallToolRequestParams(name="notepm_unknown", arguments={})
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            await notepm.call_notepm_tool(
+                client, types.CallToolRequestParams(name="notepm_unknown", arguments={})
+            )
 
     records = [r for r in caplog.records if r.name == notepm.__name__]
     assert [(r.levelno, r.exc_info is None) for r in records] == [
@@ -95,9 +99,10 @@ async def test_tool_name_cannot_forge_a_log_line(
     forged = "x\nERROR:notepm_mcp_server.notepm:偽の行です"
 
     with caplog.at_level(logging.WARNING, logger=notepm.__name__):
-        result = await notepm.call_notepm_tool(
-            config, types.CallToolRequestParams(name=forged, arguments={})
-        )
+        async with notepm.NotePMAPIClient(config) as client:
+            result = await notepm.call_notepm_tool(
+                client, types.CallToolRequestParams(name=forged, arguments={})
+            )
 
     assert result.is_error is True
     records = [r for r in caplog.records if r.name == notepm.__name__]
