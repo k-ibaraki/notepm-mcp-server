@@ -96,7 +96,7 @@ async def test_search_uses_max_body_length_from_env(
 async def test_search_raises_on_error_status(
     config: notepm.NotePMConfig, mock_api: InstallMock
 ) -> None:
-    mock_api(lambda request: httpx2.Response(401, text="Unauthorized"))
+    requests = mock_api(lambda request: httpx2.Response(401, text="Unauthorized"))
 
     with pytest.raises(ValueError) as error:
         async with notepm.NotePMAPIClient(config) as client:
@@ -104,6 +104,8 @@ async def test_search_raises_on_error_status(
 
     assert "401" in str(error.value)
     assert "Unauthorized" in str(error.value)
+    # 認証エラーは何度送っても同じ答えなので、再試行しない
+    assert len(requests) == 1
 
 
 async def test_search_raises_on_broken_json(
@@ -169,3 +171,95 @@ async def test_client_is_closed_after_context_exit(
         await client.search(notepm.SearchParams(q="議事録"))
 
     assert client._client.is_closed
+
+
+async def test_requests_carry_the_configured_timeout(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """タイムアウトは httpx2 の既定（5 秒）任せにせず、明示した値を送る。"""
+    requests = mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
+
+    async with notepm.NotePMAPIClient(config) as client:
+        await client.search(notepm.SearchParams(q="議事録"))
+
+    assert client._client.timeout == notepm.HTTP_TIMEOUT
+    assert requests[0].extensions["timeout"] == notepm.HTTP_TIMEOUT.as_dict()
+    # 全文検索は時間がかかり得るので、読み取りだけは既定より長く取っている
+    assert notepm.HTTP_TIMEOUT.read == 30.0
+
+
+async def test_search_retries_rate_limited_response(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """429 は待ってから送り直し、成功したらその結果を返す。"""
+    payload = {"pages": [{"title": "議事録", "body": "本文"}]}
+    responses = [
+        httpx2.Response(429, text="Too Many Requests"),
+        httpx2.Response(200, json=payload),
+    ]
+    requests = mock_api(lambda request: responses.pop(0))
+
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await client.search(notepm.SearchParams(q="議事録"))
+
+    assert json.loads(result) == payload
+    assert len(requests) == 2
+
+
+async def test_search_gives_up_after_max_attempts(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """一時的なサーバーエラーが続く場合は、上限まで試してエラーにする。"""
+    requests = mock_api(lambda request: httpx2.Response(503, text="Unavailable"))
+
+    with pytest.raises(ValueError) as error:
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    assert "503" in str(error.value)
+    assert len(requests) == notepm.MAX_ATTEMPTS
+
+
+async def test_search_retries_a_broken_connection(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """張り置いた接続が切られていた場合は、繋ぎ直して送り直す。
+
+    keepalive を伸ばした分だけ、相手に閉じられた接続を掴む機会は増える。
+    """
+    attempts: list[int] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx2.RemoteProtocolError("Server disconnected", request=request)
+        return httpx2.Response(200, json={"pages": []})
+
+    requests = mock_api(handler)
+
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await client.search(notepm.SearchParams(q="議事録"))
+
+    assert json.loads(result) == {"pages": []}
+    assert len(requests) == 2
+
+
+async def test_detail_retries_transient_failure(
+    config: notepm.NotePMConfig, mock_api: InstallMock
+) -> None:
+    """詳細取得も検索と同じ再試行の経路を通る。"""
+    payload = {"page": {"page_code": "abc123", "body": "本文"}}
+    responses = [
+        httpx2.Response(502, text="Bad Gateway"),
+        httpx2.Response(200, json=payload),
+    ]
+    requests = mock_api(lambda request: responses.pop(0))
+
+    async with notepm.NotePMAPIClient(config) as client:
+        result = await client.get_notepm_page_detail(
+            notepm.NotePMDetailParams(page_code="abc123")
+        )
+
+    assert json.loads(result) == payload
+    assert len(requests) == 2
+    assert str(requests[0].url) == f"{API_BASE}/abc123"

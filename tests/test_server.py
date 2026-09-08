@@ -61,6 +61,39 @@ async def test_tool_failure_keeps_the_connection_alive(
     ]
 
 
+async def test_http_client_is_shared_across_tool_calls(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HTTP クライアントは lifespan が 1 つだけ作り、停止時に閉じる（Issue #10）。
+
+    呼び出しごとに作り直すと、コネクションプールと TLS ハンドシェイクが毎回
+    捨てられる。ここでは検索と詳細取得をまたいで同じクライアントが使われること、
+    そしてセッションを抜けた時点で閉じられていることを固定する。
+    """
+    mock_api(lambda request: httpx2.Response(200, json={"pages": []}))
+
+    factory = notepm.httpx2.AsyncClient
+    created: list[httpx2.AsyncClient] = []
+
+    def recording_factory(**kwargs: Any) -> httpx2.AsyncClient:
+        http_client = factory(**kwargs)
+        created.append(http_client)
+        return http_client
+
+    monkeypatch.setattr(notepm.httpx2, "AsyncClient", recording_factory)
+
+    async with Client(notepm.create_server(config)) as client:
+        searched = await client.call_tool("notepm_search", {"q": "議事録"})
+        detailed = await client.call_tool("notepm_page_detail", {"page_code": "abc123"})
+
+    assert searched.is_error is False
+    assert detailed.is_error is False
+    assert len(created) == 1
+    assert created[0].is_closed
+
+
 async def test_unexpected_exception_does_not_stop_the_server(
     config: notepm.NotePMConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
