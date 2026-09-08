@@ -4,7 +4,7 @@
 """
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 import httpx2
@@ -18,7 +18,10 @@ TEAM = "example-team"
 API_TOKEN = "test-token"
 API_BASE = f"https://{TEAM}.notepm.jp/api/v1/pages"
 
-Handler = Callable[[httpx2.Request], httpx2.Response]
+# 応答を遅らせたいテストのために、async のハンドラも受け取れるようにしておく。
+# MockTransport は Response 以外が返ってきたら await する。
+HandlerResult = httpx2.Response | Coroutine[None, None, httpx2.Response]
+Handler = Callable[[httpx2.Request], HandlerResult]
 InstallMock = Callable[[Handler], list[httpx2.Request]]
 
 # 差し替え前の本物のクライアント。forbid_real_http で置き換わる前に捕まえておく。
@@ -96,9 +99,12 @@ def mock_api(monkeypatch: pytest.MonkeyPatch) -> InstallMock:
     def install(handler: Handler) -> list[httpx2.Request]:
         requests: list[httpx2.Request] = []
 
-        def recording_handler(request: httpx2.Request) -> httpx2.Response:
+        async def recording_handler(request: httpx2.Request) -> httpx2.Response:
             requests.append(request)
-            return handler(request)
+            result = handler(request)
+            if isinstance(result, httpx2.Response):
+                return result
+            return await result
 
         transport = httpx2.MockTransport(recording_handler)
 

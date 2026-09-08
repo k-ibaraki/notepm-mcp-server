@@ -222,6 +222,12 @@ RETRYABLE_TRANSPORT_ERRORS = (
 # 初回を含めた試行回数の上限。ツール呼び出しが長く戻らないほうが困るので、深追いしない。
 MAX_ATTEMPTS = 3
 
+# 再試行と待ち時間まで含めた、1 回の呼び出しの上限。試行ごとの上限しか持たないと、
+# 読み取り 30 秒 × 3 試行で 90 秒を超え得る。MCP のホスト側にも独自の制限があり
+# （Claude Code の MCP_TOOL_TIMEOUT など）、そちらに先に打ち切られると理由が呼び出し
+# 側に伝わらないため、こちらで上限を持って明示的なエラーとして返す。
+TOTAL_TIMEOUT_SECONDS = 60.0
+
 # 1 回目の再試行までの待ち時間。以降は試行ごとに倍にする。
 RETRY_BACKOFF_SECONDS = 0.5
 
@@ -316,6 +322,32 @@ class NotePMAPIClient:
         await self._client.aclose()
 
     async def _get(
+        self, url: str, params: dict[str, Any] | None = None
+    ) -> httpx2.Response:
+        """GET を発行します。再試行と待ち時間を含めて上限の時間で打ち切ります
+
+        Args:
+            url (str): 送信先の URL
+            params (dict[str, Any] | None): クエリパラメータ
+
+        Returns:
+            httpx2.Response: 最後の試行の応答（成否は問わない）
+
+        Raises:
+            ValueError: 上限の時間までに応答を得られなかった場合
+            httpx2.TransportError: 最後の試行でも接続できなかった場合
+        """
+        try:
+            return await asyncio.wait_for(
+                self._get_with_retry(url, params), TOTAL_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as e:
+            raise ValueError(
+                "NotePM APIからのデータ取得に失敗しました: "
+                f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に応答がありませんでした"
+            ) from e
+
+    async def _get_with_retry(
         self, url: str, params: dict[str, Any] | None = None
     ) -> httpx2.Response:
         """GET を発行し、一時的な失敗であれば間を置いて再試行します

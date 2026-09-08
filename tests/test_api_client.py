@@ -1,5 +1,6 @@
 """NotePMAPIClient の検索・詳細取得の振る舞いを検証する。"""
 
+import asyncio
 import json
 
 import httpx2
@@ -218,6 +219,51 @@ async def test_search_gives_up_after_max_attempts(
 
     assert "503" in str(error.value)
     assert len(requests) == notepm.MAX_ATTEMPTS
+
+
+async def test_search_stops_at_the_total_timeout(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """応答が返らないまま上限に達したら、待ち続けずにエラーとして返す。
+
+    試行ごとの上限しか持たないと、再試行の分だけ 1 回の呼び出しが伸びる。
+    ホスト側の制限に先に打ち切られると理由が伝わらないため、こちらで打ち切る。
+    """
+    monkeypatch.setattr(notepm, "TOTAL_TIMEOUT_SECONDS", 0.05)
+
+    async def never_answers(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(30)
+        return httpx2.Response(200, json={"pages": []})
+
+    mock_api(never_answers)
+
+    with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+
+async def test_total_timeout_also_bounds_the_retry_waits(
+    config: notepm.NotePMConfig,
+    mock_api: InstallMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上限は再試行の待ち時間も含めて効く。
+
+    待っている最中に上限へ達したら、次の試行は行わない。
+    """
+    monkeypatch.setattr(notepm, "TOTAL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(notepm, "RETRY_BACKOFF_SECONDS", 30.0)
+    monkeypatch.setattr(notepm, "MAX_RETRY_WAIT_SECONDS", 30.0)
+
+    requests = mock_api(lambda request: httpx2.Response(503, text="Unavailable"))
+
+    with pytest.raises(ValueError, match="秒以内に応答がありませんでした"):
+        async with notepm.NotePMAPIClient(config) as client:
+            await client.search(notepm.SearchParams(q="議事録"))
+
+    assert len(requests) == 1
 
 
 async def test_search_retries_a_broken_connection(
