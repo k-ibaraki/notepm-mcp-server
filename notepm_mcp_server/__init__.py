@@ -1,15 +1,18 @@
 import click
-from pathlib import Path
 import logging
 import sys
 from notepm_mcp_server.notepm import serve
 
 
 @click.command()
-@click.option("--repository", "-r", type=Path, help="Git repository path")
-@click.option("-v", "--verbose", count=True)
-def main(repository: Path | None, verbose: int) -> None:
-    """MCP NotePM Server - NotePM functionality for MCP"""
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="ログを詳しくする。既定は WARNING、-v で INFO、-vv 以上で DEBUG。",
+)
+def main(verbose: int) -> None:
+    """NotePM MCP Server - NotePM の検索と記事取得を MCP ツールとして提供する"""
     import asyncio
 
     logging_level = logging.WARN
