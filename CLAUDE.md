@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## このリポジトリについて
 
 NotePM の検索と記事取得を MCP ツールとして公開する、stdio ベースの MCP サーバーです。
-ドキュメント・コミットメッセージ・PR 本文は日本語で書きます。
+ドキュメント・コミットメッセージ・PR 本文は日本語で書きます。コミットは Conventional Commits の
+接頭辞（`fix:` / `chore:` / `docs:` / `test:` など）に日本語の要約を続け、本文には「なぜそうしたか」を書きます。
 
 ## コマンド
 
@@ -25,7 +26,7 @@ uv run pytest tests/test_api_client.py::test_search_truncates_long_body
 
 ## 構成
 
-- `notepm_mcp_server/__init__.py` — click の CLI エントリポイント。`asyncio.run(serve())` を呼ぶだけ
+- `notepm_mcp_server/__init__.py` — click の CLI エントリポイント。`-v` の数からログ水準を決めて `asyncio.run(serve())` を呼ぶ
 - `notepm_mcp_server/notepm.py` — 設定・パラメータモデル・API クライアント・MCP サーバーのすべて
 - `tests/` — pytest。実 API には接続しない
 
