@@ -252,7 +252,7 @@ def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
     logger.debug("%s: body=%r", summary, response.text[:ERROR_BODY_LOG_LIMIT])
 
 
-def _raise_for_status(response: httpx2.Response, not_found_message: str) -> None:
+def _raise_for_status(response: httpx2.Response, *, not_found_message: str) -> None:
     """成功以外のステータスを、原因ごとの例外に振り分けて送出します
 
     分類は NotePM API のドキュメント (https://notepm.jp/docs/api) が挙げる
@@ -396,8 +396,10 @@ class NotePMAPIClient:
         # 手掛かりとして添えるに留め、原因は断定しない。
         _raise_for_status(
             response,
-            "NotePM API が対象を見つけられませんでした (HTTP 404)。"
-            "NOTEPM_TEAM の値が正しいかを確認してください。",
+            not_found_message=(
+                "NotePM API が対象を見つけられませんでした (HTTP 404)。"
+                "NOTEPM_TEAM の値が正しいかを確認してください。"
+            ),
         )
 
         data = _load_json_response(response)
@@ -436,9 +438,11 @@ class NotePMAPIClient:
 
         _raise_for_status(
             response,
-            f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
-            "notepm_search の検索結果に含まれる page_code を渡しているか、"
-            "そのページが削除されていないかを確認してください。",
+            not_found_message=(
+                f"指定されたページが見つかりません (HTTP 404): page_code={params.page_code}。"
+                "notepm_search の検索結果に含まれる page_code を渡しているか、"
+                "そのページが削除されていないかを確認してください。"
+            ),
         )
 
         data = _load_json_response(response)
