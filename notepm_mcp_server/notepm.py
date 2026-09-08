@@ -386,6 +386,10 @@ class NotePMTimeoutError(NotePMError):
     """上限の時間までに応答を得られなかったときのエラー"""
 
 
+class NotePMConnectionError(NotePMError):
+    """接続や送受信の途中で失敗し、応答を得られなかったときのエラー"""
+
+
 def _log_failed_response_body(summary: str, response: httpx2.Response) -> None:
     """失敗した応答の本文を、DEBUG のときだけ先頭部分に限って記録します
 
@@ -552,7 +556,7 @@ class NotePMAPIClient:
 
         Raises:
             NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
-            httpx2.TransportError: 最後の試行でも接続できなかった場合
+            NotePMConnectionError: 最後の試行でも接続や送受信に失敗した場合
         """
         # 発行するリクエストは -vv でだけ残す。検索語は dict のまま渡すので値が repr に
         # なり、page_code は PAGE_CODE_PATTERN で検証済みなので、どちらも改行で偽のログ行
@@ -567,6 +571,18 @@ class NotePMAPIClient:
                 "NotePM APIからのデータ取得に失敗しました: "
                 f"{TOTAL_TIMEOUT_SECONDS:.0f}秒以内に結果を得られませんでした。"
                 "時間をおいてから再試行してください。"
+            ) from e
+        except httpx2.TransportError as e:
+            # 再試行を尽くした接続の失敗と、再試行しない ReadTimeout がここへ来る。
+            # サーバーの不具合ではなく相手側か経路の都合なので、他の NotePM 由来の失敗と
+            # 同じく NotePMError に分類し、呼び出し側でトレースバック無しの警告に留める
+            # （Issue #34）。例外の文言にはサーバー由来の受信データが混ざり得るため、
+            # 呼び出し側へは種別だけを渡し、文言そのものは %r でログに残す。
+            logger.warning("NotePM API との通信に失敗しました: %r", e)
+            raise NotePMConnectionError(
+                "NotePM APIからのデータ取得に失敗しました: "
+                f"NotePM との通信が完了しませんでした ({type(e).__name__})。"
+                "ネットワークの状態を確認し、時間をおいてから再試行してください。"
             ) from e
 
         logger.debug(
@@ -636,6 +652,7 @@ class NotePMAPIClient:
             NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
             NotePMResponseError: 応答をJSONとして解釈できなかった場合
             NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
+            NotePMConnectionError: 接続や送受信の途中で失敗した場合
         """
         response = await self._get(
             self.config.api_base,
@@ -677,6 +694,7 @@ class NotePMAPIClient:
             NotePMAPIError: APIが成功以外のステータスを返した場合。原因ごとの派生クラス
             NotePMResponseError: 応答をJSONとして解釈できなかった場合
             NotePMTimeoutError: 上限の時間までに応答を得られなかった場合
+            NotePMConnectionError: 接続や送受信の途中で失敗した場合
         """
         # ここで安全にパス要素へ埋め込めるのは、NotePMDetailParams が
         # PAGE_CODE_PATTERN で検証済みだからである。制約を緩めるときは注意すること。
@@ -777,7 +795,7 @@ async def call_notepm_tool(
 
     ログの水準は原因で三段に分けます。呼び出しの拒否（PAGE_CODE_PATTERN などの検証、
     未知のツール名）は防御が働いた結果なので、警告として値だけを残します。NotePM との
-    やり取りで生じた失敗（認証・存在しないページ・レート制限・打ち切りなど）も、原因は
+    やり取りで生じた失敗（認証・存在しないページ・レート制限・接続の失敗・打ち切りなど）も、原因は
     分類済みのメッセージが持っているため警告に留めます。どちらもサーバーの不具合では
     なく、トレースバックが原因の特定に寄与しないためです。それ以外は想定外の失敗なので、
     トレースバック付きで記録します。
