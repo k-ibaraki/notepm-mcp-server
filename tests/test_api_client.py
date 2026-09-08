@@ -37,12 +37,16 @@ async def test_search_sends_token_and_omits_unset_params(
     async with notepm.NotePMAPIClient(config) as client:
         await client.search(notepm.SearchParams(q="設計", page=2, per_page=5))
 
+    assert len(requests) == 1
     request = requests[0]
     assert request.url.path == "/api/v1/pages"
     assert request.url.host == f"{TEAM}.notepm.jp"
     assert request.url.params["q"] == "設計"
     assert request.url.params["page"] == "2"
     assert request.url.params["per_page"] == "5"
+    # 既定値のまま指定しなかった絞り込みは 0 として送信される
+    assert request.url.params["only_title"] == "0"
+    assert request.url.params["include_archived"] == "0"
     # 未指定の絞り込みは exclude_none により送信されない
     assert "note_code" not in request.url.params
     assert "tag_name" not in request.url.params

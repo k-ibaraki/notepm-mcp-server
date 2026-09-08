@@ -3,6 +3,7 @@
 実際の NotePM API には接続せず、httpx2 の MockTransport で応答を差し替える。
 """
 
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -24,16 +25,13 @@ _REAL_ASYNC_CLIENT = httpx2.AsyncClient
 
 @pytest.fixture(autouse=True)
 def clear_notepm_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """NotePM 関連の環境変数を毎回消し、手元の .env に影響されないようにする。
+    """NOTEPM_ で始まる環境変数を毎回消し、手元の .env に影響されないようにする。
 
     notepm モジュールは import 時に load_dotenv() を呼ぶため、開発者の環境に .env が
-    あると環境変数が設定済みの状態でテストが始まってしまう。
+    あると環境変数が設定済みの状態でテストが始まってしまう。個別に列挙すると環境変数が
+    増えたときに消し漏れるため、接頭辞で走査する。
     """
-    for name in (
-        "NOTEPM_TEAM",
-        "NOTEPM_API_TOKEN",
-        "NOTEPM_MAX_BODY_LENGTH",
-    ):
+    for name in [key for key in os.environ if key.startswith("NOTEPM_")]:
         monkeypatch.delenv(name, raising=False)
 
 
